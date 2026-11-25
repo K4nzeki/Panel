@@ -382,7 +382,6 @@ class _Brand extends StatelessWidget {
           width: 72,
           height: 72,
           decoration: BoxDecoration(
-            color: c.primary,
             borderRadius: BorderRadius.circular(22),
             boxShadow: [
               BoxShadow(
@@ -392,7 +391,10 @@ class _Brand extends StatelessWidget {
               ),
             ],
           ),
-          child: Icon(Icons.auto_stories_rounded, size: 38, color: c.onPrimary),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(22),
+            child: Image.asset('assets/logo.png', fit: BoxFit.cover),
+          ),
         ),
         const SizedBox(height: 18),
         Text('MyReadList', style: context.text.headlineMedium),

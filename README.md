@@ -4,7 +4,7 @@ A Flutter rebuild of the MyReadList web app: track the manga, manhwa, manhua
 and comics you read. It uses the **same Supabase project and database** as the
 web version, so existing accounts and lists work right away.
 
-## Run it
+## Create it
 
 ```bash
 # 1. Generate the Android / iOS / web platform folders (keeps lib/ and test/)
@@ -16,17 +16,10 @@ flutter analyze
 flutter test
 
 # 3. Run on a phone or emulator
-flutter run
+flutter build apk --release --dart-define-from-file=env.json
 ```
 
 Needs Flutter 3.29 or newer (`flutter --version`).
-
-Build a shareable Android APK:
-
-```bash
-flutter build apk --release
-# → build/app/outputs/flutter-apk/app-release.apk
-```
 
 ## One-time setup after `flutter create`
 
@@ -70,13 +63,19 @@ add `com.readlist.panel://login-callback`.
 
 ## Supabase keys
 
-`lib/config.dart` holds the project URL and the *publishable* key from the web
-app's `.env`. Publishable keys are designed to ship inside apps (Row Level
-Security protects the data). To point at another project without editing code:
+Keys are kept out of Git. They live in `env.json` (ignored by `.gitignore`).
 
 ```bash
-flutter run --dart-define=SUPABASE_URL=https://xxxx.supabase.co --dart-define=SUPABASE_KEY=sb_publishable_xxx
+cp env.example.json env.json      # then paste your URL + publishable key
+flutter run --dart-define-from-file=env.json
+flutter build apk --release --dart-define-from-file=env.json
 ```
+
+Android Studio: Run → Edit Configurations → *Additional run args* →
+`--dart-define-from-file=env.json`. VS Code uses `.vscode/launch.json`.
+
+Only ever use the **publishable** key in the app — never the `service_role` /
+secret key. Data is protected by Row Level Security (see `supabase_setup.sql`).
 
 ## What changed from the web app (UI/UX)
 

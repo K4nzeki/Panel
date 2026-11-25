@@ -7,6 +7,12 @@ import 'config.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  if (!AppConfig.isConfigured) {
+    throw StateError(
+      'Supabase keys missing. Copy env.example.json to env.json, fill it in, '
+      'and run with --dart-define-from-file=env.json',
+    );
+  }
   await Supabase.initialize(
     url: AppConfig.supabaseUrl,
     publishableKey: AppConfig.supabaseKey,
