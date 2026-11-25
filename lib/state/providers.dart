@@ -79,29 +79,70 @@ final themeModeProvider =
 // The reader's list
 // ---------------------------------------------------------------------------
 
-/// Non-null while the last sync with Supabase failed (shown as a banner).
+/// Non-null while the last sync with Supabase failed for a reason other
+/// than being offline (shown as a banner).
 final syncErrorProvider = StateProvider<String?>((ref) => null);
 
+/// False while the server can't be reached. Changes keep working locally.
+final onlineProvider = StateProvider<bool>((ref) => true);
+
+/// Ids of titles with changes that haven't reached the server yet.
+final pendingIdsProvider = StateProvider<Set<String>>((ref) => const {});
+
+/// How many changes are waiting to sync.
+final pendingCountProvider = StateProvider<int>((ref) => 0);
+
+/// Offline-first list. Every change is applied on the phone straight away,
+/// saved to a local queue (the "outbox"), and sent to Supabase whenever
+/// there's a connection — on launch, when the app comes back to the
+/// foreground, every 20 seconds while something is waiting, and on
+/// pull-to-refresh.
 class EntriesNotifier extends AsyncNotifier<List<Entry>> {
   EntriesRepository get _repo => ref.read(repositoryProvider)!;
 
   List<Entry> get _current => state.value ?? const [];
 
+  List<Map<String, dynamic>> _outbox = [];
+  bool _syncing = false;
+  bool _syncAgain = false;
+  Map<String, dynamic>? _inFlight; // op currently being sent
+  Timer? _timer;
+  AppLifecycleListener? _lifecycle;
+
   @override
   Future<List<Entry>> build() async {
     final repo = ref.watch(repositoryProvider);
-    if (repo == null) return const [];
+    _timer?.cancel();
+    _lifecycle?.dispose();
+    ref.onDispose(() {
+      _timer?.cancel();
+      _lifecycle?.dispose();
+    });
+    if (repo == null) {
+      _outbox = [];
+      return const [];
+    }
+
+    _outbox = await repo.readOutbox();
+    _publishPending();
+    _timer = Timer.periodic(const Duration(seconds: 20), (_) {
+      if (_outbox.isNotEmpty) unawaited(sync());
+    });
+    _lifecycle = AppLifecycleListener(onResume: () => unawaited(refresh()));
 
     final cached = await repo.readCache();
     if (cached != null) {
-      // Show the cached list instantly, then refresh from the server.
+      // Show the saved list instantly (works offline), then sync.
       Future.microtask(refresh);
       return cached;
     }
     final fresh = await repo.fetchAll();
     unawaited(repo.writeCache(fresh));
+    _setOnline(true);
     return fresh;
   }
+
+  // ---- local state ----
 
   void _set(List<Entry> list) {
     state = AsyncData(list);
@@ -109,28 +150,182 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     if (repo != null) unawaited(repo.writeCache(list));
   }
 
-  void _syncOk() => ref.read(syncErrorProvider.notifier).state = null;
-  void _syncFailed(Object e) =>
-      ref.read(syncErrorProvider.notifier).state = friendlyError(e);
+  void _setOnline(bool v) {
+    if (ref.read(onlineProvider) != v) {
+      ref.read(onlineProvider.notifier).state = v;
+    }
+  }
 
+  void _publishPending() {
+    final ids = <String>{
+      for (final op in _outbox)
+        if (op['id'] != null) op['id'] as String,
+    };
+    ref.read(pendingIdsProvider.notifier).state = ids;
+    ref.read(pendingCountProvider.notifier).state = _outbox.length;
+  }
+
+  Future<void> _persistOutbox() async {
+    _publishPending();
+    final repo = ref.read(repositoryProvider);
+    if (repo != null) await repo.writeOutbox(_outbox);
+  }
+
+  /// Adds an operation to the queue, merging with earlier ones where it can
+  /// (e.g. edits to a title that hasn't been uploaded yet just change the
+  /// pending upload).
+  void _enqueue(Map<String, dynamic> op) {
+    final id = op['id'] as String?;
+    switch (op['op']) {
+      case 'update':
+        final i = _outbox.lastIndexWhere(
+            (o) => o['id'] == id && (o['op'] == 'upsert' || o['op'] == 'update'));
+        // Only merge into the latest op for this id if nothing else for it
+        // (like a log row) was queued after it.
+        // (Never touch the op that is being uploaded right now.)
+        if (i >= 0 &&
+            !identical(_outbox[i], _inFlight) &&
+            !_outbox.skip(i + 1).any((o) => o['id'] == id)) {
+          final target = _outbox[i];
+          final key = target['op'] == 'upsert' ? 'row' : 'patch';
+          target[key] = {
+            ...(target[key] as Map).cast<String, dynamic>(),
+            ...(op['patch'] as Map).cast<String, dynamic>(),
+          };
+          return;
+        }
+      case 'delete':
+        final uploading = _inFlight != null && _inFlight!['id'] == id;
+        final neverUploaded = _outbox.any((o) =>
+            o['id'] == id && o['op'] == 'upsert' && !identical(o, _inFlight));
+        _outbox.removeWhere((o) =>
+            o['id'] == id && o['op'] != 'delete' && !identical(o, _inFlight));
+        // Never reached the server: nothing to delete there.
+        if (neverUploaded && !uploading) return;
+    }
+    _outbox.add(op);
+  }
+
+  Future<void> _queue(List<Map<String, dynamic>> ops) async {
+    for (final op in ops) {
+      _enqueue(op);
+    }
+    await _persistOutbox();
+    unawaited(sync());
+  }
+
+  // ---- syncing ----
+
+  static bool _isConnectionProblem(Object e) {
+    if (e is PostgrestException) {
+      // Expired / missing login token: wait for the session to refresh.
+      return e.code == 'PGRST301' ||
+          e.code == 'PGRST303' ||
+          e.message.toLowerCase().contains('jwt');
+    }
+    return true; // socket errors, timeouts, auth refresh failures, etc.
+  }
+
+  /// Sends queued changes to Supabase. Stops (and keeps the rest) at the
+  /// first connection problem; a change the server rejects is dropped so it
+  /// can't block everything behind it.
+  Future<void> sync() async {
+    if (_syncing) {
+      _syncAgain = true;
+      return;
+    }
+    final repo = ref.read(repositoryProvider);
+    if (repo == null || _outbox.isEmpty) return;
+    _syncing = true;
+    try {
+      while (_outbox.isNotEmpty) {
+        final op = _outbox.first;
+        _inFlight = op;
+        try {
+          switch (op['op']) {
+            case 'upsert':
+              await repo.upsertRow((op['row'] as Map).cast<String, dynamic>());
+            case 'update':
+              await repo.patchRow(
+                  op['id'] as String, (op['patch'] as Map).cast<String, dynamic>());
+            case 'delete':
+              await repo.deleteRow(op['id'] as String);
+            case 'log':
+              await repo.insertLog(
+                  op['table'] as String, (op['row'] as Map).cast<String, dynamic>());
+          }
+        } catch (e) {
+          if (_isConnectionProblem(e)) {
+            _inFlight = null;
+            _setOnline(false);
+            return;
+          }
+          // Log rows only feed the charts; never surface those failures.
+          if (op['op'] != 'log') {
+            ref.read(syncErrorProvider.notifier).state =
+                "A change couldn't be saved: ${friendlyError(e)}";
+          }
+        }
+        _inFlight = null;
+        _outbox.remove(op);
+        await _persistOutbox();
+        _setOnline(true);
+      }
+    } finally {
+      _syncing = false;
+      if (_syncAgain) {
+        _syncAgain = false;
+        unawaited(sync());
+      }
+    }
+  }
+
+  /// Pushes pending changes, then pulls the latest list from the server.
   Future<void> refresh() async {
     final repo = ref.read(repositoryProvider);
     if (repo == null) return;
+    await sync();
+    // Don't overwrite local changes that haven't been uploaded yet.
+    if (_outbox.isNotEmpty) return;
     try {
       final fresh = await repo.fetchAll();
+      if (_outbox.isNotEmpty) return; // something changed meanwhile
       _set(fresh);
-      _syncOk();
+      _setOnline(true);
     } catch (e) {
-      _syncFailed(e);
+      if (_isConnectionProblem(e)) {
+        _setOnline(false);
+      } else {
+        ref.read(syncErrorProvider.notifier).state = friendlyError(e);
+      }
       if (!state.hasValue) state = AsyncError(e, StackTrace.current);
     }
   }
+
+  void clearSyncError() => ref.read(syncErrorProvider.notifier).state = null;
+
+  // ---- changes ----
 
   int _topPosition() {
     final list = _current;
     if (list.isEmpty) return 0;
     return list.map((e) => e.position).reduce((a, b) => a < b ? a : b) - 1;
   }
+
+  Map<String, dynamic> _rowFor(Entry e) => {
+        'id': e.id,
+        'title': e.title,
+        'type': e.type.label,
+        'status': e.status.label,
+        'chapter': e.chapter,
+        'reread': e.reread,
+        'position': e.position,
+        'cover_url': e.coverUrl,
+        'author': e.author,
+        'total_chapters': e.totalChapters,
+        'read_on_url': e.readOnUrl,
+        'created_at': e.createdAt?.toUtc().toIso8601String(),
+      };
 
   Future<Entry> add({
     required String title,
@@ -142,19 +337,23 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     int? totalChapters,
     String? readOnUrl,
   }) async {
-    final entry = await _repo.insert(
+    final entry = Entry(
+      id: newUuid(),
       title: title,
       type: type,
       status: status,
       chapter: chapter,
       position: _topPosition(),
+      createdAt: DateTime.now(),
       coverUrl: coverUrl,
       author: author,
       totalChapters: totalChapters,
       readOnUrl: readOnUrl,
     );
     _set([entry, ..._current]);
-    _syncOk();
+    await _queue([
+      {'op': 'upsert', 'id': entry.id, 'row': _rowFor(entry)}
+    ]);
     return entry;
   }
 
@@ -167,30 +366,29 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     return null;
   }
 
-  /// Optimistically applies [optimistic] locally, then saves [patch].
-  /// Rolls back and rethrows if the save fails.
+  /// Applies [optimistic] locally right away and queues [patch] for upload.
   Future<void> save(Entry before, Entry optimistic,
       Map<String, dynamic> patch) async {
     if (patch.isEmpty) return;
-    final previous = _current;
-    state = AsyncData([
-      for (final e in previous) e.id == before.id ? optimistic : e,
-    ]);
-    try {
-      final saved = await _repo.update(before, patch);
-      _set([
-        for (final e in _current) e.id == before.id ? saved : e,
-      ]);
-      _syncOk();
-      if (before.status != EntryStatus.finished &&
-          saved.status == EntryStatus.finished) {
-        unawaited(HapticFeedback.mediumImpact());
-      }
-    } catch (e) {
-      state = AsyncData(previous);
-      _syncFailed(e);
-      rethrow;
+    final full = {...patch};
+    var after = optimistic;
+    if (patch.containsKey('chapter')) {
+      final now = DateTime.now();
+      full['last_read_at'] = now.toUtc().toIso8601String();
+      after = after.copyWith(lastReadAt: now);
     }
+    _set([
+      for (final e in _current) e.id == before.id ? after : e,
+    ]);
+    if (before.status != EntryStatus.finished &&
+        after.status == EntryStatus.finished) {
+      unawaited(HapticFeedback.mediumImpact());
+    }
+    await _queue([
+      {'op': 'update', 'id': before.id, 'patch': full},
+      for (final log in _repo.activityRows(before, after, patch))
+        {'op': 'log', 'id': before.id, 'table': log.table, 'row': log.row},
+    ]);
   }
 
   Future<void> bumpChapter(Entry e, int by) async {
@@ -224,46 +422,50 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
 
   /// Deletes [e] and returns it so the caller can offer "Undo".
   Future<Entry> remove(Entry e) async {
-    final previous = _current;
-    state = AsyncData(previous.where((x) => x.id != e.id).toList());
-    try {
-      await _repo.delete(e.id);
-      _set(_current);
-      _syncOk();
-      unawaited(HapticFeedback.lightImpact());
-      return e;
-    } catch (err) {
-      state = AsyncData(previous);
-      _syncFailed(err);
-      rethrow;
-    }
+    _set(_current.where((x) => x.id != e.id).toList());
+    unawaited(HapticFeedback.lightImpact());
+    await _queue([
+      {'op': 'delete', 'id': e.id}
+    ]);
+    return e;
   }
 
   /// Puts a deleted entry back (gets a new id; keeps everything else).
   Future<void> restore(Entry e) async {
-    final restored = await _repo.insert(
+    final restored = Entry(
+      id: newUuid(),
       title: e.title,
       type: e.type,
       status: e.status,
       chapter: e.chapter,
       reread: e.reread,
       position: e.position,
+      createdAt: e.createdAt ?? DateTime.now(),
       coverUrl: e.coverUrl,
       author: e.author,
       totalChapters: e.totalChapters,
       readOnUrl: e.readOnUrl,
+      lastReadAt: e.lastReadAt,
     );
     final list = [..._current, restored]
       ..sort((a, b) => a.position.compareTo(b.position));
     _set(list);
-    _syncOk();
+    await _queue([
+      {
+        'op': 'upsert',
+        'id': restored.id,
+        'row': {
+          ..._rowFor(restored),
+          'last_read_at': restored.lastReadAt?.toUtc().toIso8601String(),
+        }
+      }
+    ]);
   }
 
   /// Moves [moved] to sit where [target] is, in the custom ("My order") sort.
   Future<void> reorder(String movedId, String targetId) async {
     if (movedId == targetId) return;
-    final previous = _current;
-    final ordered = [...previous]
+    final ordered = [..._current]
       ..sort((a, b) => a.position.compareTo(b.position));
     final from = ordered.indexWhere((e) => e.id == movedId);
     final to = ordered.indexWhere((e) => e.id == targetId);
@@ -280,20 +482,16 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     }
     if (changed.isEmpty) return;
     unawaited(HapticFeedback.selectionClick());
-    state = AsyncData(next);
-    try {
-      await _repo.setPositions(changed);
-      _set(next);
-      _syncOk();
-    } catch (e) {
-      state = AsyncData(previous);
-      _syncFailed(e);
-      rethrow;
-    }
+    _set(next);
+    await _queue([
+      for (final c in changed.entries)
+        {'op': 'update', 'id': c.key, 'patch': {'position': c.value}},
+    ]);
   }
 
   /// Bulk import. Optionally looks each title up on AniList for its cover,
-  /// author and chapter count. Returns how many were added.
+  /// author and chapter count (skipped if that fails, e.g. offline).
+  /// Returns how many were added.
   Future<int> importAll(
     List<({String title, EntryType type, EntryStatus status, int chapter, int reread})>
         items, {
@@ -303,32 +501,40 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     if (items.isEmpty) return 0;
     final anilist = ref.read(aniListProvider);
     var top = _topPosition();
-    final rows = <Map<String, dynamic>>[];
+    var canEnrich = enrich;
+    final added = <Entry>[];
     for (var i = 0; i < items.length; i++) {
       final it = items[i];
       SearchResult? match;
-      if (enrich && it.type != EntryType.comic) {
-        match = await anilist.findMatch(it.title);
-        await Future<void>.delayed(const Duration(milliseconds: 250));
+      if (canEnrich && it.type != EntryType.comic) {
+        try {
+          match = await anilist.findMatch(it.title);
+          await Future<void>.delayed(const Duration(milliseconds: 250));
+        } catch (_) {
+          canEnrich = false; // offline — import the rest without covers
+        }
       }
-      rows.add({
-        'title': it.title,
-        'type': it.type.label,
-        'status': it.status.label,
-        'chapter': it.chapter,
-        'reread': it.reread,
-        'position': top--,
-        'cover_url': match?.coverUrl,
-        'author': match?.author,
-        'total_chapters': match?.totalChapters,
-      });
+      added.add(Entry(
+        id: newUuid(),
+        title: it.title,
+        type: it.type,
+        status: it.status,
+        chapter: it.chapter,
+        reread: it.reread,
+        position: top--,
+        createdAt: DateTime.now(),
+        coverUrl: match?.coverUrl,
+        author: match?.author,
+        totalChapters: match?.totalChapters,
+      ));
       onProgress?.call(i + 1, items.length);
     }
-    final added = await _repo.insertMany(rows);
     final list = [...added, ..._current]
       ..sort((a, b) => a.position.compareTo(b.position));
     _set(list);
-    _syncOk();
+    await _queue([
+      for (final e in added) {'op': 'upsert', 'id': e.id, 'row': _rowFor(e)},
+    ]);
     return added.length;
   }
 }
@@ -500,7 +706,7 @@ String friendlyError(Object e) {
       s.contains('ClientException') ||
       s.contains('Failed host lookup') ||
       s.contains('TimeoutException')) {
-    return "You're offline — changes will need a connection to save.";
+    return "You're offline. Your changes are saved on this phone and will sync when you're back online.";
   }
   return s.replaceFirst('Exception: ', '');
 }

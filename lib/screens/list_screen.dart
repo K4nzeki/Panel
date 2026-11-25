@@ -40,6 +40,8 @@ class _ListScreenState extends ConsumerState<ListScreen> {
     final visible = ref.watch(visibleEntriesProvider(widget.tab));
     final counts = ref.watch(statusCountsProvider);
     final syncError = ref.watch(syncErrorProvider);
+    final online = ref.watch(onlineProvider);
+    final pending = ref.watch(pendingCountProvider);
 
     final totalInTab = _isLibrary
         ? counts.entries
@@ -63,6 +65,9 @@ class _ListScreenState extends ConsumerState<ListScreen> {
             _Header(tab: widget.tab, query: query, total: totalInTab),
             if (syncError != null)
               SliverToBoxAdapter(child: _SyncBanner(message: syncError)),
+            if (!online || pending > 0)
+              SliverToBoxAdapter(
+                  child: _OfflineBanner(online: online, pending: pending)),
             if (_isLibrary && totalInTab > 0)
               const SliverToBoxAdapter(child: _SummaryStrip()),
             if (totalInTab > 0) ...[
@@ -482,6 +487,54 @@ class _SyncBanner extends ConsumerWidget {
               child: Text(message,
                   style: context.text.bodySmall
                       ?.copyWith(color: c.onErrorContainer)),
+            ),
+            IconButton(
+              tooltip: 'Dismiss',
+              onPressed: () =>
+                  ref.read(entriesProvider.notifier).clearSyncError(),
+              icon: Icon(Icons.close_rounded, color: c.onErrorContainer),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+class _OfflineBanner extends ConsumerWidget {
+  const _OfflineBanner({required this.online, required this.pending});
+  final bool online;
+  final int pending;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.colors;
+    final changes = pending == 1 ? '1 change' : '$pending changes';
+    final String text;
+    if (!online && pending > 0) {
+      text = "You're offline. $changes saved on this phone will sync "
+          "when you're back online.";
+    } else if (!online) {
+      text = "You're offline. You can keep updating your list — it will "
+          'sync when you reconnect.';
+    } else {
+      text = 'Syncing $changes…';
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: Material(
+        color: c.secondaryContainer,
+        borderRadius: BorderRadius.circular(14),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
+          child: Row(children: [
+            Icon(online ? Icons.cloud_sync_rounded : Icons.cloud_off_rounded,
+                color: c.onSecondaryContainer),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(text,
+                  style: context.text.bodySmall
+                      ?.copyWith(color: c.onSecondaryContainer)),
             ),
             TextButton(
               onPressed: () => ref.read(entriesProvider.notifier).refresh(),

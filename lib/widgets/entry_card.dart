@@ -87,6 +87,13 @@ class EntryTile extends ConsumerWidget {
                           if (entry.reread > 0)
                             TagChip('×${entry.reread}',
                                 icon: Icons.replay_rounded),
+                          if (ref.watch(pendingIdsProvider
+                              .select((ids) => ids.contains(entry.id))))
+                            Tooltip(
+                              message: 'Not synced yet',
+                              child: Icon(Icons.cloud_upload_outlined,
+                                  size: 16, color: c.onSurfaceVariant),
+                            ),
                         ],
                       ),
                       const SizedBox(height: 8),

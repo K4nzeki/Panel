@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -65,78 +66,73 @@ class EntriesRepository {
     return data.map(Entry.fromJson).toList();
   }
 
-  /// Saves [patch] and returns the row as stored. Also writes the activity
-  /// logs that power the Stats tab (same rules as the web app).
-  Future<Entry> update(Entry before, Map<String, dynamic> patch) async {
-    final full = {...patch};
-    if (patch.containsKey('chapter')) {
-      full['last_read_at'] = DateTime.now().toUtc().toIso8601String();
-    }
-    final row = await _db
-        .from('entries')
-        .update(full)
-        .eq('id', before.id)
-        .eq('user_id', userId)
-        .select(entryColumns)
-        .maybeSingle();
-    if (row == null) {
-      throw const DataException(
-          'No matching row was updated. Pull to refresh and try again.');
-    }
-    final after = Entry.fromJson(row);
-    await _logActivity(before, after, patch);
-    return after;
-  }
-
-  Future<void> _logActivity(
-      Entry before, Entry after, Map<String, dynamic> patch) async {
-    try {
-      // A title moving *into* Finished counts as one completion this month.
-      if (patch.containsKey('status') &&
-          before.status != EntryStatus.finished &&
-          after.status == EntryStatus.finished) {
-        await _db.from('completion_log').insert({
+  /// The activity-log rows (for the Stats tab) that a change from [before]
+  /// to [after] produces. Built at the moment of the change so offline edits
+  /// are counted on the right day once they sync.
+  List<({String table, Map<String, dynamic> row})> activityRows(
+      Entry before, Entry after, Map<String, dynamic> patch) {
+    final out = <({String table, Map<String, dynamic> row})>[];
+    Map<String, dynamic> completion() => {
           'user_id': userId,
           'entry_id': after.id,
           'title': after.title,
           'month': localMonthKey(),
-        });
-      }
+        };
 
-      // Each extra reread is another completion.
-      final rereadDelta =
-          patch.containsKey('reread') ? after.reread - before.reread : 0;
-      if (rereadDelta > 0) {
-        await _db.from('completion_log').insert(List.generate(
-            rereadDelta,
-            (_) => {
-                  'user_id': userId,
-                  'entry_id': after.id,
-                  'title': after.title,
-                  'month': localMonthKey(),
-                }));
-      }
+    // A title moving *into* Finished counts as one completion this month.
+    if (patch.containsKey('status') &&
+        before.status != EntryStatus.finished &&
+        after.status == EntryStatus.finished) {
+      out.add((table: 'completion_log', row: completion()));
+    }
 
-      // Chapters read today. Going down means a restart (reread), so the
-      // new chapter number counts as read; never logs a negative number.
-      if (patch.containsKey('chapter') &&
-          after.chapter != before.chapter &&
-          !(rereadDelta > 0 && after.chapter < before.chapter)) {
-        final delta = after.chapter > before.chapter
-            ? after.chapter - before.chapter
-            : after.chapter;
-        if (delta > 0) {
-          await _db.from('chapter_log').insert({
+    // Each extra reread is another completion.
+    final rereadDelta =
+        patch.containsKey('reread') ? after.reread - before.reread : 0;
+    for (var i = 0; i < rereadDelta; i++) {
+      out.add((table: 'completion_log', row: completion()));
+    }
+
+    // Chapters read today. Going down means a restart (reread), so the
+    // new chapter number counts as read; never logs a negative number.
+    if (patch.containsKey('chapter') &&
+        after.chapter != before.chapter &&
+        !(rereadDelta > 0 && after.chapter < before.chapter)) {
+      final delta = after.chapter > before.chapter
+          ? after.chapter - before.chapter
+          : after.chapter;
+      if (delta > 0) {
+        out.add((
+          table: 'chapter_log',
+          row: {
             'user_id': userId,
             'entry_id': after.id,
             'day': localDayKey(),
             'delta': delta,
-          });
-        }
+          }
+        ));
       }
-    } catch (_) {
-      // Logs only feed the stats charts — never fail the user's save.
     }
+    return out;
+  }
+
+  // ---- Raw writes used by the offline sync queue ----
+
+  Future<void> upsertRow(Map<String, dynamic> row) async {
+    await _db.from('entries').upsert({...row, 'user_id': userId},
+        onConflict: 'id');
+  }
+
+  Future<void> patchRow(String id, Map<String, dynamic> patch) async {
+    await _db.from('entries').update(patch).eq('id', id).eq('user_id', userId);
+  }
+
+  Future<void> deleteRow(String id) async {
+    await _db.from('entries').delete().eq('id', id).eq('user_id', userId);
+  }
+
+  Future<void> insertLog(String table, Map<String, dynamic> row) async {
+    await _db.from(table).insert({...row, 'user_id': userId});
   }
 
   Future<void> delete(String id) async {
@@ -229,7 +225,43 @@ class EntriesRepository {
   Future<void> clearCache() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_cacheKey);
+    await prefs.remove(_outboxKey);
   }
+
+  // ---- Outbox: changes made offline, waiting to be sent ----
+
+  String get _outboxKey => 'outbox_v1_$userId';
+
+  Future<List<Map<String, dynamic>>> readOutbox() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_outboxKey);
+      if (raw == null) return [];
+      return (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<void> writeOutbox(List<Map<String, dynamic>> ops) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (ops.isEmpty) {
+      await prefs.remove(_outboxKey);
+    } else {
+      await prefs.setString(_outboxKey, jsonEncode(ops));
+    }
+  }
+}
+
+/// Random UUID v4, so titles added offline already have their final id.
+String newUuid() {
+  final r = Random.secure();
+  final b = List<int>.generate(16, (_) => r.nextInt(256));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  final h = b.map((x) => x.toRadixString(16).padLeft(2, '0')).join();
+  return '${h.substring(0, 8)}-${h.substring(8, 12)}-${h.substring(12, 16)}-'
+      '${h.substring(16, 20)}-${h.substring(20)}';
 }
 
 class DataException implements Exception {

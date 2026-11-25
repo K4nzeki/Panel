@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../config.dart';
+import '../state/app_lock.dart';
 import '../state/providers.dart';
 import '../theme.dart';
 import '../utils/import_parser.dart';
@@ -101,6 +102,28 @@ class ProfileScreen extends ConsumerWidget {
                 ]),
               ),
 
+              // ---- Security ----
+              const SectionLabel('Security'),
+              Card(
+                child: SwitchListTile(
+                  secondary: const Icon(Icons.fingerprint_rounded),
+                  title: const Text('Unlock with fingerprint / face'),
+                  subtitle: const Text(
+                      'Stay signed in and open the app without your password'),
+                  value: ref.watch(appLockProvider.select((s) => s.enabled)),
+                  onChanged: (v) async {
+                    final err =
+                        await ref.read(appLockProvider.notifier).setEnabled(v);
+                    if (context.mounted && err != null) {
+                      showSnack(context, err, error: true);
+                    } else if (context.mounted && v &&
+                        ref.read(appLockProvider).enabled) {
+                      showSnack(context, 'App lock is on');
+                    }
+                  },
+                ),
+              ),
+
               // ---- Appearance ----
               const SectionLabel('Appearance'),
               Card(
@@ -185,11 +208,24 @@ class ProfileScreen extends ConsumerWidget {
               const SizedBox(height: 20),
               FilledButton.tonalIcon(
                 onPressed: () async {
+                  final pending = ref.read(pendingCountProvider);
                   final ok = await confirm(context,
-                      title: 'Sign out?', action: 'Sign out');
+                      title: pending > 0
+                          ? 'Sign out with $pending unsynced '
+                              '${pending == 1 ? 'change' : 'changes'}?'
+                          : 'Sign out?',
+                      action: 'Sign out');
                   if (ok == true) {
                     await ref.read(repositoryProvider)?.clearCache();
-                    await ref.read(supabaseProvider).auth.signOut();
+                    try {
+                      await ref.read(supabaseProvider).auth.signOut();
+                    } catch (_) {
+                      // Offline: still sign out on this phone.
+                      await ref
+                          .read(supabaseProvider)
+                          .auth
+                          .signOut(scope: SignOutScope.local);
+                    }
                   }
                 },
                 icon: const Icon(Icons.logout_rounded),

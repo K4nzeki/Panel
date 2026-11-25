@@ -4,18 +4,14 @@ A Flutter rebuild of the MyReadList web app: track the manga, manhwa, manhua
 and comics you read. It uses the **same Supabase project and database** as the
 web version, so existing accounts and lists work right away.
 
-## Create it
+## Build it
 
 ```bash
 # 1. Generate the Android / iOS / web platform folders (keeps lib/ and test/)
-flutter create --org com.readlist --project-name panel --platforms android,ios,web .
-
-# 2. Get packages and check everything
+flutter clean
 flutter pub get
 flutter analyze
 flutter test
-
-# 3. Run on a phone or emulator
 flutter build apk --release --dart-define-from-file=env.json
 ```
 
@@ -76,6 +72,22 @@ Android Studio: Run → Edit Configurations → *Additional run args* →
 
 Only ever use the **publishable** key in the app — never the `service_role` /
 secret key. Data is protected by Row Level Security (see `supabase_setup.sql`).
+
+## Offline mode
+
+The list is saved on the phone. Adding, editing, +1 chapter, deleting and
+reordering all work with no connection: changes go into a local queue and are
+sent to Supabase automatically when the app is online again (on launch, when
+it returns to the foreground, every 20 s while something is waiting, and on
+pull-to-refresh). Titles with unsent changes show a small cloud icon.
+Discover, Stats, Community and account settings need a connection.
+
+## App lock (fingerprint / face)
+
+Profile → Security → *Unlock with fingerprint / face*. You stay signed in and
+the app asks for your fingerprint, face or phone PIN when it opens (or after
+30 s in the background). Android needs `FlutterFragmentActivity`, the
+`USE_BIOMETRIC` permission and an AppCompat theme — all already set up.
 
 ## What changed from the web app (UI/UX)
 
