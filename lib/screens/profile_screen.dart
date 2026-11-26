@@ -5,12 +5,17 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../config.dart';
+import '../models/entry.dart';
+import '../services/sheet_file.dart';
 import '../state/app_lock.dart';
 import '../state/providers.dart';
 import '../theme.dart';
+import '../utils/import_merge.dart';
 import '../utils/import_parser.dart';
+import '../utils/sheet_import.dart';
 import '../widgets/common.dart';
 import '../widgets/entry_sheet.dart';
+import '../widgets/update_dialog.dart';
 import 'community_screen.dart';
 
 class ProfileScreen extends ConsumerWidget {
@@ -159,7 +164,7 @@ class ProfileScreen extends ConsumerWidget {
                   ListTile(
                     leading: const Icon(Icons.file_download_outlined),
                     title: const Text('Import titles'),
-                    subtitle: const Text('Paste a list, one title per line'),
+                    subtitle: const Text('From an Excel / CSV file or a pasted list'),
                     onTap: () => _import(context, ref),
                   ),
                   const Divider(indent: 16, endIndent: 16),
@@ -194,6 +199,16 @@ class ProfileScreen extends ConsumerWidget {
                     leading: const Icon(Icons.lock_outline_rounded),
                     title: const Text('Change password'),
                     onTap: () => _changePassword(context, ref),
+                  ),
+                  const Divider(indent: 16, endIndent: 16),
+                  ListTile(
+                    leading: const Icon(Icons.system_update_rounded),
+                    title: const Text('Check for updates'),
+                    subtitle: Text(switch (ref.watch(appVersionProvider).value) {
+                      final v? => 'Version $v',
+                      null => 'Get the latest version from GitHub',
+                    }),
+                    onTap: () => checkForUpdates(context, ref, manual: true),
                   ),
                   const Divider(indent: 16, endIndent: 16),
                   ListTile(
@@ -364,10 +379,8 @@ class _ImportSheet extends ConsumerStatefulWidget {
 
 class _ImportSheetState extends ConsumerState<_ImportSheet> {
   final _text = TextEditingController();
-  bool _enrich = true;
   bool _busy = false;
-  int _done = 0;
-  int _total = 0;
+  String? _fileName;
   ParseResult _parsed = const ParseResult([], []);
 
   @override
@@ -376,34 +389,44 @@ class _ImportSheetState extends ConsumerState<_ImportSheet> {
     super.dispose();
   }
 
-  Future<void> _run() async {
-    final items = [
-      for (final p in _parsed.entries)
-        (
-          title: p.title,
-          type: p.type,
-          status: p.status,
-          chapter: p.chapter,
-          reread: p.reread,
-        ),
-    ];
-    if (items.isEmpty) return;
-    setState(() {
-      _busy = true;
-      _done = 0;
-      _total = items.length;
-    });
+  ImportPlan get _plan => planImport(
+      ref.read(entriesProvider).value ?? const <Entry>[], _parsed.entries);
+
+  Future<void> _pickFile() async {
     try {
-      final n = await ref.read(entriesProvider.notifier).importAll(
-            items,
-            enrich: _enrich,
-            onProgress: (d, t) {
-              if (mounted) setState(() => _done = d);
-            },
-          );
+      final sheet = await pickSheetFile();
+      if (sheet == null || !mounted) return;
+      setState(() {
+        _fileName = sheet.name;
+        _text.clear();
+        _parsed = parseSheetRows(sheet.rows);
+      });
+      if (_parsed.entries.isEmpty && mounted) {
+        showSnack(context, 'No titles found in ${sheet.name}', error: true);
+      }
+    } catch (e) {
+      if (mounted) {
+        showSnack(context,
+            e is FormatException ? e.message : friendlyError(e), error: true);
+      }
+    }
+  }
+
+  Future<void> _run() async {
+    final plan = _plan;
+    if (plan.isEmpty) return;
+    setState(() => _busy = true);
+    try {
+      final r = await ref.read(entriesProvider.notifier).applyImport(plan);
       if (!mounted) return;
       Navigator.of(context).pop();
-      showSnack(context, 'Imported $n titles');
+      final parts = [
+        if (r.added > 0) 'added ${r.added}',
+        if (r.updated > 0) 'updated ${r.updated}',
+        if (plan.skipped > 0) 'skipped ${plan.skipped} already in your list',
+      ];
+      final msg = parts.join(', ');
+      showSnack(context, '${msg[0].toUpperCase()}${msg.substring(1)}');
     } catch (e) {
       if (mounted) {
         setState(() => _busy = false);
@@ -415,64 +438,139 @@ class _ImportSheetState extends ConsumerState<_ImportSheet> {
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
+    // Re-plan whenever the list changes (e.g. a sync finishes).
+    ref.watch(entriesProvider);
+    final plan = _plan;
+    final hasInput = _parsed.entries.isNotEmpty || _parsed.errors.isNotEmpty;
+
     return Padding(
       padding: EdgeInsets.fromLTRB(
           20, 0, 20, 20 + MediaQuery.viewInsetsOf(context).bottom),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Text('Import titles', style: context.text.headlineSmall),
-          const SizedBox(height: 6),
-          Text(
-            'One per line, either:\n'
-            'Solo Leveling | 120 | Reading | Manhwa | 0\n'
-            'Solo Leveling 120 Reading Manhwa 0',
-            style: context.text.bodySmall?.copyWith(
-                color: c.onSurfaceVariant, fontFamily: 'monospace', height: 1.5),
-          ),
-          const SizedBox(height: 14),
-          TextField(
-            controller: _text,
-            minLines: 5,
-            maxLines: 10,
-            enabled: !_busy,
-            onChanged: (v) => setState(() => _parsed = parseImportText(v)),
-            decoration: const InputDecoration(hintText: 'Paste your list here'),
-          ),
-          const SizedBox(height: 8),
-          if (_parsed.entries.isNotEmpty || _parsed.errors.isNotEmpty)
-            Text(
-              '${_parsed.entries.length} ready'
-              '${_parsed.errors.isNotEmpty ? ' · ${_parsed.errors.length} skipped' : ''}',
-              style: context.text.labelLarge,
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Import titles', style: context.text.headlineSmall),
+            const SizedBox(height: 14),
+
+            // ---- From a file ----
+            OutlinedButton.icon(
+              onPressed: _busy ? null : _pickFile,
+              icon: const Icon(Icons.table_chart_outlined),
+              label: Text(_fileName ?? 'Choose Excel or CSV file'),
             ),
-          for (final err in _parsed.errors.take(3))
-            Text(err,
-                style: context.text.bodySmall?.copyWith(color: c.error)),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            value: _enrich,
-            onChanged: _busy ? null : (v) => setState(() => _enrich = v),
-            title: const Text('Find covers on AniList'),
-            subtitle: const Text('Slower, but your list looks much nicer'),
-          ),
-          if (_busy) ...[
-            LinearProgressIndicator(
-                value: _total == 0 ? null : _done / _total),
             const SizedBox(height: 6),
-            Text('Looking up $_done of $_total…',
-                style: context.text.labelSmall),
+            Text(
+              'Columns: Title, Chapter, Status, Type, Reread. '
+              'A header row is optional; only Title is required.',
+              style: context.text.bodySmall
+                  ?.copyWith(color: c.onSurfaceVariant),
+            ),
+
+            const SizedBox(height: 14),
+            Row(children: [
+              const Expanded(child: Divider()),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: Text('or paste',
+                    style: context.text.labelMedium
+                        ?.copyWith(color: c.onSurfaceVariant)),
+              ),
+              const Expanded(child: Divider()),
+            ]),
             const SizedBox(height: 10),
+
+            // ---- Pasted text ----
+            Text(
+              'Solo Leveling | 120 | Reading | Manhwa | 0\n'
+              'Solo Leveling 120 Reading Manhwa 0',
+              style: context.text.bodySmall?.copyWith(
+                  color: c.onSurfaceVariant,
+                  fontFamily: 'monospace',
+                  height: 1.5),
+            ),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _text,
+              minLines: 4,
+              maxLines: 8,
+              enabled: !_busy,
+              onChanged: (v) => setState(() {
+                _fileName = null;
+                _parsed = parseImportText(v);
+              }),
+              decoration:
+                  const InputDecoration(hintText: 'Paste your list here'),
+            ),
+
+            // ---- Preview ----
+            if (hasInput) ...[
+              const SizedBox(height: 12),
+              _PlanSummary(
+                  plan: plan, errors: _parsed.errors.length),
+              for (final err in _parsed.errors.take(3))
+                Text(err,
+                    style: context.text.bodySmall?.copyWith(color: c.error)),
+            ],
+            const SizedBox(height: 8),
+            Text(
+              'Covers are found automatically after importing.',
+              style: context.text.bodySmall
+                  ?.copyWith(color: c.onSurfaceVariant),
+            ),
+            const SizedBox(height: 12),
+            if (_busy) ...[
+              const LinearProgressIndicator(),
+              const SizedBox(height: 10),
+            ],
+            FilledButton(
+              onPressed: _busy || plan.isEmpty ? null : _run,
+              child: Text(plan.isEmpty
+                  ? 'Import'
+                  : 'Import ${plan.toAdd.length + plan.toUpdate.length} titles'),
+            ),
           ],
-          FilledButton(
-            onPressed: _busy || _parsed.entries.isEmpty ? null : _run,
-            child: Text(_parsed.entries.isEmpty
-                ? 'Import'
-                : 'Import ${_parsed.entries.length} titles'),
-          ),
-        ],
+        ),
       ),
+    );
+  }
+}
+
+/// "12 new · 3 will update chapters · 5 already in your list".
+class _PlanSummary extends StatelessWidget {
+  const _PlanSummary({required this.plan, required this.errors});
+  final ImportPlan plan;
+  final int errors;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    Widget line(IconData icon, Color color, String text) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(children: [
+            Icon(icon, size: 18, color: color),
+            const SizedBox(width: 8),
+            Expanded(child: Text(text, style: context.text.bodyMedium)),
+          ]),
+        );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        line(Icons.add_circle_outline_rounded, c.primary,
+            '${plan.toAdd.length} new'),
+        if (plan.toUpdate.isNotEmpty)
+          line(Icons.trending_up_rounded, c.tertiary,
+              '${plan.toUpdate.length} already in your list, will move to the higher chapter'),
+        if (plan.skipped > 0)
+          line(Icons.check_circle_outline_rounded, c.onSurfaceVariant,
+              '${plan.skipped} already in your list, skipped'),
+        if (plan.mergedInFile > 0)
+          line(Icons.call_merge_rounded, c.onSurfaceVariant,
+              '${plan.mergedInFile} repeated rows merged (kept the higher chapter)'),
+        if (errors > 0)
+          line(Icons.error_outline_rounded, c.error, '$errors rows skipped'),
+      ],
     );
   }
 }

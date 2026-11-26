@@ -52,3 +52,15 @@ dependencies {
     // AppCompat theme for the fingerprint / face prompt (local_auth).
     implementation("androidx.appcompat:appcompat:1.7.0")
 }
+
+// After `flutter build apk --release`, also save the APK as
+// build/app/outputs/flutter-apk/Panel-<version>.apk (version from pubspec.yaml),
+// ready to attach to a GitHub release without renaming.
+val copyPanelApk = tasks.register<Copy>("copyPanelApk") {
+    from(layout.buildDirectory.file("outputs/apk/release/app-release.apk"))
+    into(layout.buildDirectory.dir("outputs/flutter-apk"))
+    rename { "Panel-${flutter.versionName}.apk" }
+}
+tasks.matching { it.name == "assembleRelease" }.configureEach {
+    finalizedBy(copyPanelApk)
+}

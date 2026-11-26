@@ -7,6 +7,7 @@ import 'profile_screen.dart';
 import 'stats_screen.dart';
 import '../models/entry.dart';
 import '../state/providers.dart';
+import '../widgets/update_dialog.dart';
 
 class HomeShell extends ConsumerStatefulWidget {
   const HomeShell({super.key});
@@ -17,6 +18,15 @@ class HomeShell extends ConsumerStatefulWidget {
 
 class _HomeShellState extends ConsumerState<HomeShell> {
   int _index = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    // Quietly look for a new GitHub release (at most every 12 hours).
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) checkForUpdates(context, ref);
+    });
+  }
 
   static const _pages = <Widget>[
     ListScreen(tab: ListTab.library),

@@ -90,6 +90,18 @@ class AniListService {
     );
   }
 
+  /// Like [findMatch], but lets network / rate-limit errors through so a
+  /// background job can tell "not on AniList" apart from "offline / busy".
+  Future<SearchResult?> lookup(String title) async {
+    final results = await search(title);
+    if (results.isEmpty) return null;
+    final t = title.trim().toLowerCase();
+    return results.firstWhere(
+      (r) => r.title.trim().toLowerCase() == t,
+      orElse: () => results.first,
+    );
+  }
+
   /// Best match for a title (exact title match preferred), or null.
   Future<SearchResult?> findMatch(String title) async {
     try {
@@ -118,7 +130,8 @@ class AniListService {
     )
         .timeout(const Duration(seconds: 15));
     if (res.statusCode == 429) {
-      throw const AniListException('AniList is busy — try again in a minute.');
+      throw const AniListException('AniList is busy — try again in a minute.',
+          rateLimited: true);
     }
     if (res.statusCode != 200) {
       throw AniListException('Search failed (${res.statusCode}).');
@@ -179,8 +192,11 @@ class AniListService {
 }
 
 class AniListException implements Exception {
-  const AniListException(this.message);
+  const AniListException(this.message, {this.rateLimited = false});
   final String message;
+
+  /// True when AniList asked us to slow down (HTTP 429).
+  final bool rateLimited;
   @override
   String toString() => message;
 }

@@ -1,7 +1,7 @@
 name: panel
-description: MyReadList — track the manga, manhwa, manhua and comics you read.
+description: Panel — track the manga, manhwa, manhua and comics you read.
 publish_to: "none"
-version: 1.0.0+1
+version: 1.7.0+7
 
 environment:
   sdk: ">=3.7.0 <4.0.0"
@@ -18,6 +18,8 @@ dependencies:
   url_launcher: ^6.3.0
   intl: ^0.20.2
   local_auth: ^3.0.0
+  file_picker: ^10.3.3
+  archive: ^4.0.4
 
 dev_dependencies:
   flutter_test:

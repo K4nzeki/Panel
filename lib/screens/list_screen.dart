@@ -42,6 +42,7 @@ class _ListScreenState extends ConsumerState<ListScreen> {
     final syncError = ref.watch(syncErrorProvider);
     final online = ref.watch(onlineProvider);
     final pending = ref.watch(pendingCountProvider);
+    final coverFill = ref.watch(coverFillProvider);
 
     final totalInTab = _isLibrary
         ? counts.entries
@@ -68,6 +69,8 @@ class _ListScreenState extends ConsumerState<ListScreen> {
             if (!online || pending > 0)
               SliverToBoxAdapter(
                   child: _OfflineBanner(online: online, pending: pending)),
+            if (coverFill != null && coverFill.total > 0)
+              SliverToBoxAdapter(child: _CoverFillBanner(progress: coverFill)),
             if (_isLibrary && totalInTab > 0)
               const SliverToBoxAdapter(child: _SummaryStrip()),
             if (totalInTab > 0) ...[
@@ -541,6 +544,46 @@ class _OfflineBanner extends ConsumerWidget {
               child: const Text('Retry'),
             ),
           ]),
+        ),
+      ),
+    );
+  }
+}
+
+/// Shown while covers for titles without a photo are being looked up.
+class _CoverFillBanner extends StatelessWidget {
+  const _CoverFillBanner({required this.progress});
+  final ({int done, int total}) progress;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: Material(
+        color: c.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(14),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                Icon(Icons.image_search_rounded,
+                    size: 18, color: c.onSurfaceVariant),
+                const SizedBox(width: 10),
+                Text(
+                  'Finding covers ${progress.done} of ${progress.total}…',
+                  style: context.text.bodySmall
+                      ?.copyWith(color: c.onSurfaceVariant),
+                ),
+              ]),
+              const SizedBox(height: 8),
+              LinearProgressIndicator(
+                value: progress.done / progress.total,
+              ),
+            ],
+          ),
         ),
       ),
     );

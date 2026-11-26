@@ -10,6 +10,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../models/entry.dart';
 import '../services/anilist.dart';
 import '../services/entries_repository.dart';
+import '../utils/import_merge.dart';
 
 // ---------------------------------------------------------------------------
 // Core services
@@ -91,6 +92,10 @@ final pendingIdsProvider = StateProvider<Set<String>>((ref) => const {});
 
 /// How many changes are waiting to sync.
 final pendingCountProvider = StateProvider<int>((ref) => 0);
+
+/// Progress of the background "find missing covers" job, or null when idle.
+final coverFillProvider =
+    StateProvider<({int done, int total})?>((ref) => null);
 
 /// Offline-first list. Every change is applied on the phone straight away,
 /// saved to a local queue (the "outbox"), and sent to Supabase whenever
@@ -280,26 +285,30 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     }
   }
 
-  /// Pushes pending changes, then pulls the latest list from the server.
+  /// Pushes pending changes, pulls the latest list from the server, then
+  /// looks up covers for any titles that don't have one yet.
   Future<void> refresh() async {
     final repo = ref.read(repositoryProvider);
     if (repo == null) return;
     await sync();
     // Don't overwrite local changes that haven't been uploaded yet.
-    if (_outbox.isNotEmpty) return;
-    try {
-      final fresh = await repo.fetchAll();
-      if (_outbox.isNotEmpty) return; // something changed meanwhile
-      _set(fresh);
-      _setOnline(true);
-    } catch (e) {
-      if (_isConnectionProblem(e)) {
-        _setOnline(false);
-      } else {
-        ref.read(syncErrorProvider.notifier).state = friendlyError(e);
+    if (_outbox.isEmpty) {
+      try {
+        final fresh = await repo.fetchAll();
+        if (_outbox.isEmpty) {
+          _set(fresh);
+          _setOnline(true);
+        }
+      } catch (e) {
+        if (_isConnectionProblem(e)) {
+          _setOnline(false);
+        } else {
+          ref.read(syncErrorProvider.notifier).state = friendlyError(e);
+        }
+        if (!state.hasValue) state = AsyncError(e, StackTrace.current);
       }
-      if (!state.hasValue) state = AsyncError(e, StackTrace.current);
     }
+    if (ref.read(onlineProvider)) unawaited(fillMissingCovers());
   }
 
   void clearSyncError() => ref.read(syncErrorProvider.notifier).state = null;
@@ -489,53 +498,153 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     ]);
   }
 
-  /// Bulk import. Optionally looks each title up on AniList for its cover,
-  /// author and chapter count (skipped if that fails, e.g. offline).
-  /// Returns how many were added.
-  Future<int> importAll(
-    List<({String title, EntryType type, EntryStatus status, int chapter, int reread})>
-        items, {
-    bool enrich = true,
-    void Function(int done, int total)? onProgress,
-  }) async {
-    if (items.isEmpty) return 0;
-    final anilist = ref.read(aniListProvider);
+  /// Bulk import from a pasted list or an Excel / CSV file. Uses an
+  /// [ImportPlan] (see [planImport]) so the same title is never added twice:
+  /// new titles are added, titles where the import has more chapters are
+  /// moved forward to that chapter, everything else is left alone.
+  ///
+  /// Covers are looked up afterwards in the background (same as refresh).
+  Future<({int added, int updated})> applyImport(ImportPlan plan) async {
+    if (plan.isEmpty) return (added: 0, updated: 0);
     var top = _topPosition();
-    var canEnrich = enrich;
-    final added = <Entry>[];
-    for (var i = 0; i < items.length; i++) {
-      final it = items[i];
-      SearchResult? match;
-      if (canEnrich && it.type != EntryType.comic) {
-        try {
-          match = await anilist.findMatch(it.title);
-          await Future<void>.delayed(const Duration(milliseconds: 250));
-        } catch (_) {
-          canEnrich = false; // offline — import the rest without covers
-        }
-      }
-      added.add(Entry(
-        id: newUuid(),
-        title: it.title,
-        type: it.type,
-        status: it.status,
-        chapter: it.chapter,
-        reread: it.reread,
-        position: top--,
-        createdAt: DateTime.now(),
-        coverUrl: match?.coverUrl,
-        author: match?.author,
-        totalChapters: match?.totalChapters,
-      ));
-      onProgress?.call(i + 1, items.length);
+    final now = DateTime.now();
+
+    // Keep the file's order: first row ends up at the top of "My order".
+    final added = <Entry>[
+      for (final p in plan.toAdd.reversed)
+        Entry(
+          id: newUuid(),
+          title: p.title,
+          type: p.type,
+          status: p.status,
+          chapter: p.chapter,
+          reread: p.reread,
+          position: top--,
+          createdAt: now,
+        ),
+    ].reversed.toList();
+
+    final updates = <String, ({Entry after, Map<String, dynamic> patch})>{};
+    for (final u in plan.toUpdate) {
+      final e = u.existing;
+      final p = u.incoming;
+      final reread = p.reread > e.reread ? p.reread : e.reread;
+      final patch = <String, dynamic>{
+        'chapter': p.chapter,
+        'last_read_at': now.toUtc().toIso8601String(),
+        if (p.status != e.status) 'status': p.status.label,
+        if (reread != e.reread) 'reread': reread,
+      };
+      updates[e.id] = (
+        after: e.copyWith(
+          chapter: p.chapter,
+          status: p.status,
+          reread: reread,
+          lastReadAt: now,
+        ),
+        patch: patch,
+      );
     }
-    final list = [...added, ..._current]
-      ..sort((a, b) => a.position.compareTo(b.position));
+
+    final list = [
+      ...added,
+      for (final e in _current) updates[e.id]?.after ?? e,
+    ]..sort((a, b) => a.position.compareTo(b.position));
     _set(list);
+    // No chapter / completion log rows here: catching up an old list
+    // shouldn't show up as hundreds of chapters "read today" in Stats.
     await _queue([
       for (final e in added) {'op': 'upsert', 'id': e.id, 'row': _rowFor(e)},
+      for (final u in updates.entries)
+        {'op': 'update', 'id': u.key, 'patch': u.value.patch},
     ]);
-    return added.length;
+    unawaited(fillMissingCovers());
+    return (added: added.length, updated: updates.length);
+  }
+
+  bool _filling = false;
+  bool _fillAgain = false;
+
+  /// Titles already looked up this session that AniList had no cover for,
+  /// so every refresh doesn't search for them again.
+  final Set<String> _noCoverFound = {};
+
+  /// Looks up covers (plus author / chapter count if missing) on AniList
+  /// for titles that don't have a cover yet. Runs one title at a time in
+  /// the background, saves each as it's found, and stops quietly when
+  /// offline. Comics are skipped (AniList barely has any).
+  Future<void> fillMissingCovers() async {
+    if (_filling) {
+      _fillAgain = true;
+      return;
+    }
+    bool needsCover(Entry e) =>
+        (e.coverUrl == null || e.coverUrl!.trim().isEmpty) &&
+        e.type != EntryType.comic &&
+        !_noCoverFound.contains(titleKey(e.title));
+
+    final todo = _current.where(needsCover).map((e) => e.id).toList();
+    if (todo.isEmpty) return;
+    _filling = true;
+    final progress = ref.read(coverFillProvider.notifier);
+    progress.state = (done: 0, total: todo.length);
+    final anilist = ref.read(aniListProvider);
+    try {
+      var busyRetries = 0;
+      for (var i = 0; i < todo.length; i++) {
+        if (ref.read(repositoryProvider) == null) return; // signed out
+        // Re-read: the title may have been edited or deleted meanwhile.
+        final e = _current.where((x) => x.id == todo[i]).firstOrNull;
+        if (e != null && needsCover(e)) {
+          SearchResult? match;
+          try {
+            match = await anilist.lookup(e.title);
+            busyRetries = 0;
+          } on AniListException catch (err) {
+            if (err.rateLimited && busyRetries < 2) {
+              busyRetries++;
+              await Future<void>.delayed(const Duration(seconds: 30));
+              i--; // try this title again
+              continue;
+            }
+            return; // AniList keeps refusing — try again next refresh
+          } catch (_) {
+            return; // offline — try again next refresh
+          }
+          final cover = match?.coverUrl;
+          // Look it up again in case it changed during the request.
+          final now = _current.where((x) => x.id == e.id).firstOrNull;
+          if (cover == null || cover.isEmpty) {
+            _noCoverFound.add(titleKey(e.title));
+          } else if (now != null && needsCover(now)) {
+            final patch = <String, dynamic>{'cover_url': cover};
+            var after = now.copyWith(coverUrl: Nullable(cover));
+            if (now.author == null && match!.author != null) {
+              patch['author'] = match.author;
+              after = after.copyWith(author: Nullable(match.author));
+            }
+            if (now.totalChapters == null && match!.totalChapters != null) {
+              patch['total_chapters'] = match.totalChapters;
+              after = after.copyWith(totalChapters: Nullable(match.totalChapters));
+            }
+            _set([for (final x in _current) x.id == now.id ? after : x]);
+            await _queue([
+              {'op': 'update', 'id': now.id, 'patch': patch}
+            ]);
+          }
+          // Stay well under AniList's rate limit.
+          await Future<void>.delayed(const Duration(milliseconds: 700));
+        }
+        progress.state = (done: i + 1, total: todo.length);
+      }
+    } finally {
+      _filling = false;
+      progress.state = null;
+      if (_fillAgain) {
+        _fillAgain = false;
+        unawaited(fillMissingCovers());
+      }
+    }
   }
 }
 

@@ -397,7 +397,7 @@ class _Brand extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 18),
-        Text('MyReadList', style: context.text.headlineMedium),
+        Text('Panel', style: context.text.headlineMedium),
         const SizedBox(height: 6),
         Text(
           'Track every manga, manhwa, manhua\nand comic you read.',

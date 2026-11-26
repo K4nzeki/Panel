@@ -67,7 +67,7 @@ class _LockScreenState extends ConsumerState<LockScreen> {
                   child: Image.asset('assets/logo.png', width: 72, height: 72),
                 ),
                 const SizedBox(height: 18),
-                Text('MyReadList is locked',
+                Text('Panel is locked',
                     style: context.text.headlineSmall,
                     textAlign: TextAlign.center),
                 if (email != null) ...[

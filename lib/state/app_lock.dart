@@ -78,7 +78,7 @@ class AppLockNotifier extends Notifier<AppLockState> {
   /// or null on success / when the user just cancelled.
   Future<String?> unlock() async {
     try {
-      if (await _authenticate('Unlock MyReadList')) {
+      if (await _authenticate('Unlock Panel')) {
         state = state.copyWith(locked: false);
       }
       return null;
