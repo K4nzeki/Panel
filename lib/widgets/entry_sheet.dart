@@ -176,8 +176,8 @@ class _EntrySheet extends ConsumerWidget {
                             ),
                           ),
                           Text(
-                            e.totalChapters != null
-                                ? 'of ${e.totalChapters}'
+                            e.knownChapters != null
+                                ? 'of ${e.knownChapters}'
                                 : 'tap to set',
                             style: context.text.labelMedium
                                 ?.copyWith(color: c.onSurfaceVariant),
@@ -337,7 +337,12 @@ class _ReadRow extends ConsumerWidget {
     final link = ref.watch(readingLinksProvider.select((m) => m[entry.id]));
     final downloaded = ref.watch(downloadsProvider.select(
         (s) => s.done.values.where((d) => d.entryId == entry.id).length));
-    final started = (link?.hasProgress ?? false) || entry.chapter > 0;
+    // The chapter list (saved copy first, then fresh) lets the button name
+    // the exact chapter Resume opens, e.g. the next one after a finished one.
+    final chapters = link == null
+        ? const <ChapterInfo>[]
+        : ref.watch(chaptersProvider(entry.id).select((l) => l.chapters));
+    final label = readButtonLabel(entry, link, chapters);
 
     Future<void> resume() async {
       try {
@@ -359,7 +364,7 @@ class _ReadRow extends ConsumerWidget {
                   minimumSize: const Size.fromHeight(52)),
               onPressed: resume,
               icon: const Icon(Icons.play_arrow_rounded),
-              label: Text(started ? 'Resume' : 'Start reading'),
+              label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
             ),
           ),
           const SizedBox(width: 10),
@@ -388,7 +393,7 @@ class _ReadRow extends ConsumerWidget {
         : link.lastFinished
             ? 'finished Ch ${_num(n)}'
             : 'stopped at Ch ${_num(n)}'
-                '${link.lastPageCount != null ? ', page ${link.lastPage + 1}' : ''}';
+                '${link.lastPageCount != null ? ', page ${link.lastPage + 1} of ${link.lastPageCount}' : ''}';
     return [
       'Reading on ${link.sourceName}',
       if (stopped != null) stopped,

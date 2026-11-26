@@ -113,9 +113,24 @@ class Entry {
   bool get hasNewChapters =>
       status == EntryStatus.reading && unreadChapters > 0;
 
-  /// 0..1 progress, or null when the total chapter count is unknown.
+  /// How many chapters the series has, as far as we know: the total you or
+  /// AniList set, or the newest chapter the source has if that's higher
+  /// (ongoing series keep adding chapters past an old total). Null when
+  /// neither is known.
+  ///
+  /// This is chapters *available*. It never feeds into [chapter] (chapters
+  /// *read*): a new chapter coming out only moves this number.
+  int? get knownChapters {
+    final total = totalChapters, latest = latestChapter;
+    if (total == null || total <= 0) return (latest ?? 0) > 0 ? latest : null;
+    if (latest == null || latest <= total) return total;
+    return latest;
+  }
+
+  /// 0..1 progress (chapters read / [knownChapters]), or null when the
+  /// chapter count is unknown.
   double? get progress {
-    final total = totalChapters;
+    final total = knownChapters;
     if (total == null || total <= 0) return null;
     return (chapter / total).clamp(0.0, 1.0).toDouble();
   }

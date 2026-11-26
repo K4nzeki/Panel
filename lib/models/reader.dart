@@ -95,6 +95,7 @@ class ReadingLink {
     this.lastChapterNumber,
     this.lastScanlator,
     this.lastPage = 0,
+    this.lastPageOffset = 0,
     this.lastPageCount,
     this.lastFinished = false,
     this.lastReadAt,
@@ -119,7 +120,12 @@ class ReadingLink {
   final String? lastChapterKey;
   final double? lastChapterNumber;
   final String? lastScanlator;
+  /// 0-based page you were on.
   final int lastPage;
+
+  /// How far down [lastPage] you were, 0..1 (webtoon strips are one tall
+  /// "page", so the page number alone can be a long way off).
+  final double lastPageOffset;
   final int? lastPageCount;
 
   /// You reached the end of [lastChapterKey]; Resume goes to the next one.
@@ -134,6 +140,7 @@ class ReadingLink {
     double? lastChapterNumber,
     String? lastScanlator,
     int? lastPage,
+    double? lastPageOffset,
     int? lastPageCount,
     bool? lastFinished,
     DateTime? lastReadAt,
@@ -151,6 +158,7 @@ class ReadingLink {
         lastChapterNumber: lastChapterNumber ?? this.lastChapterNumber,
         lastScanlator: lastScanlator ?? this.lastScanlator,
         lastPage: lastPage ?? this.lastPage,
+        lastPageOffset: lastPageOffset ?? this.lastPageOffset,
         lastPageCount: lastPageCount ?? this.lastPageCount,
         lastFinished: lastFinished ?? this.lastFinished,
         lastReadAt: lastReadAt ?? this.lastReadAt,
@@ -191,6 +199,7 @@ class ReadingLink {
         'last_chapter_number': lastChapterNumber,
         'last_scanlator': lastScanlator,
         'last_page': lastPage,
+        'last_page_offset': lastPageOffset,
         'last_page_count': lastPageCount,
         'last_finished': lastFinished,
         'last_read_at': lastReadAt?.millisecondsSinceEpoch,
@@ -217,6 +226,9 @@ class ReadingLink {
       lastChapterNumber: (j['last_chapter_number'] as num?)?.toDouble(),
       lastScanlator: j['last_scanlator'] as String?,
       lastPage: (j['last_page'] as num?)?.toInt() ?? 0,
+      lastPageOffset: ((j['last_page_offset'] as num?)?.toDouble() ?? 0)
+          .clamp(0.0, 1.0)
+          .toDouble(),
       lastPageCount: (j['last_page_count'] as num?)?.toInt(),
       lastFinished: j['last_finished'] == true,
       lastReadAt: at is int ? DateTime.fromMillisecondsSinceEpoch(at) : null,

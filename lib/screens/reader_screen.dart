@@ -36,12 +36,16 @@ class ReaderScreen extends ConsumerStatefulWidget {
     required this.order,
     required this.index,
     this.startPage = 0,
+    this.startOffset = 0,
   });
 
   final String entryId;
   final List<ChapterInfo> order;
   final int index;
   final int startPage;
+
+  /// How far down [startPage] to open, 0..1 (the saved spot on resume).
+  final double startOffset;
 
   @override
   ConsumerState<ReaderScreen> createState() => _ReaderScreenState();
@@ -50,9 +54,14 @@ class ReaderScreen extends ConsumerStatefulWidget {
 class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   late int _index = widget.index.clamp(0, widget.order.length - 1);
   late int _startPage = widget.startPage;
+  late double _startOffset = widget.startOffset;
   late final ReadingLinksNotifier _links;
+  AppLifecycleListener? _lifecycle;
 
-  final _scroll = ScrollController();
+  // keepScrollOffset: false — otherwise the next chapter's list reopens at
+  // the previous chapter's scroll offset (PageStorage), often right at the
+  // end, and the first scroll marked a chapter you never read as finished.
+  final _scroll = ScrollController(keepScrollOffset: false);
   List<_Page>? _pages;
   List<GlobalKey> _keys = const [];
   Map<String, String> _headers = const {};
@@ -63,11 +72,19 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   bool _offline = false;
   bool _fromDownload = false;
   int _page = 0;
+
+  /// How far down [_page] you are, 0..1.
+  double _pageOffset = 0;
   bool _ui = true;
   bool _finished = false;
   bool _settling = false;
   int _gen = 0;
   Timer? _saveTimer;
+
+  /// Last position written, so tiny scrolls don't trigger writes.
+  int _savedPage = -1;
+  double _savedOffset = -1;
+  DateTime _savedAt = DateTime.fromMillisecondsSinceEpoch(0);
 
   ChapterInfo get _chapter => widget.order[_index];
   bool get _hasNext => _index + 1 < widget.order.length;
@@ -78,6 +95,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     super.initState();
     // Kept for dispose(), where ref can't be used any more.
     _links = ref.read(readingLinksProvider.notifier);
+    // Leaving the app (home button, app switcher, screen off, being killed):
+    // write the spot right away instead of waiting for the debounce.
+    _lifecycle = AppLifecycleListener(
+      onInactive: _flush,
+      onHide: _flush,
+      onPause: _flush,
+      onDetach: _flush,
+    );
     unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
     // After the first frame: loading saves progress, which updates providers
     // (not allowed while the widget tree is being built).
@@ -88,6 +113,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   @override
   void dispose() {
+    _lifecycle?.dispose();
     _saveTimer?.cancel();
     // Providers can't change while the tree is being torn down: save right
     // after this frame instead.
@@ -107,6 +133,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       _finished = false;
       _settling = false;
       _page = 0;
+      _pageOffset = 0;
     });
     final ch = _chapter;
     final List<_Page> pages;
@@ -140,15 +167,18 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
     if (!mounted || gen != _gen) return;
     final start = _startPage.clamp(0, pages.length - 1);
+    // A saved offset only applies to the page it was saved on.
+    final offset = start == _startPage ? _startOffset.clamp(0.0, 1.0) : 0.0;
     setState(() {
       _pages = pages;
       _keys = List.generate(pages.length, (_) => GlobalKey());
       _page = start;
+      _pageOffset = offset.toDouble();
     });
     if (_scroll.hasClients) _scroll.jumpTo(0);
     _save();
     ref.read(entriesProvider.notifier).touch(widget.entryId);
-    if (start > 0) _jumpTo(start);
+    if (start > 0 || offset > 0) _jumpTo(start);
   }
 
   /// Scrolls to page [p]. Pages far down aren't built yet, so this jumps
@@ -172,6 +202,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             if (mounted) _jumpTo(p, attempt + 5);
           });
         } else {
+          _scrollIntoPage(p, _pageOffset);
           _endJump(p);
         }
         return;
@@ -182,6 +213,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       }
       _jumpTo(p, attempt + 1);
     });
+  }
+
+  /// Page [p] is at the top of the screen: scroll [fraction] of its height
+  /// further, to the exact spot inside it (long webtoon strips).
+  void _scrollIntoPage(int p, double fraction) {
+    if (fraction <= 0 || !_scroll.hasClients) return;
+    final box = _keys[p].currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.hasSize) return;
+    final target = _scroll.offset + fraction * box.size.height;
+    _scroll.jumpTo(target.clamp(0.0, _scroll.position.maxScrollExtent));
   }
 
   void _endJump(int p) {
@@ -199,9 +240,13 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     final entryId = widget.entryId;
     final chapter = _chapter;
     final page = _page;
+    final offset = _pageOffset;
     final done = finished || _finished;
+    _savedPage = page;
+    _savedOffset = offset;
+    _savedAt = DateTime.now();
     void run() => links.saveProgress(entryId, chapter,
-        page: page, pageCount: pages.length, finished: done);
+        page: page, offset: offset, pageCount: pages.length, finished: done);
     if (later) {
       scheduleMicrotask(run);
     } else {
@@ -209,9 +254,23 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     }
   }
 
+  /// Debounced save: writes 800 ms after scrolling stops, and at least
+  /// every 5 s during a long, continuous scroll.
   void _scheduleSave() {
     _saveTimer?.cancel();
+    if (DateTime.now().difference(_savedAt) > const Duration(seconds: 5)) {
+      _save();
+      return;
+    }
     _saveTimer = Timer(const Duration(milliseconds: 800), _save);
+  }
+
+  /// Saves right now (leaving the app).
+  void _flush() {
+    if (!mounted) return;
+    _saveTimer?.cancel();
+    _saveTimer = null;
+    _save();
   }
 
   /// Reached the end: remember it, and move the library forward.
@@ -242,27 +301,38 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   }
 
   bool _onScroll(ScrollNotification n) {
-    if (n.depth != 0 || _pages == null || _settling) return false;
-    final threshold = MediaQuery.sizeOf(context).height * 0.4;
+    final pages = _pages;
+    if (n.depth != 0 || pages == null || _settling) return false;
+    final vp = n.context?.findRenderObject();
+    final top =
+        vp is RenderBox && vp.attached ? vp.localToGlobal(Offset.zero).dy : 0.0;
+    final threshold = top + MediaQuery.sizeOf(context).height * 0.4;
     var current = _page;
+    var offset = _pageOffset;
     for (var i = 0; i < _keys.length; i++) {
       final ctx = _keys[i].currentContext;
       if (ctx == null) continue;
       final box = ctx.findRenderObject();
-      if (box is! RenderBox || !box.attached) continue;
-      if (box.localToGlobal(Offset.zero).dy <= threshold) {
+      if (box is! RenderBox || !box.attached || !box.hasSize) continue;
+      final y = box.localToGlobal(Offset.zero).dy;
+      if (y <= threshold) {
         current = i;
+        final h = box.size.height;
+        offset = h > 0 ? ((top - y) / h).clamp(0.0, 1.0).toDouble() : 0.0;
       } else {
         break;
       }
     }
-    final atEnd = n.metrics.extentAfter < 48;
-    if (current != _page || (atEnd && !_finished)) {
+    // Only the end of the *last page* finishes a chapter (not a list that
+    // happens to start scrolled down, or pages still loading).
+    final atEnd = n.metrics.extentAfter < 48 && current >= pages.length - 1;
+    final moved =
+        current != _savedPage || (offset - _savedOffset).abs() > 0.02;
+    if (current != _page || moved || (atEnd && !_finished)) {
       _safely(() {
-        if (current != _page) {
-          setState(() => _page = current);
-          _scheduleSave();
-        }
+        _pageOffset = offset;
+        if (current != _page) setState(() => _page = current);
+        if (moved) _scheduleSave();
         if (atEnd) _markFinished();
       });
     }
@@ -278,6 +348,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     setState(() {
       _index = next;
       _startPage = 0;
+      _startOffset = 0;
     });
     _load();
   }
@@ -329,6 +400,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       content = NotificationListener<ScrollNotification>(
         onNotification: _onScroll,
         child: ListView.builder(
+          // A fresh list (and scroll position) per chapter.
+          key: ValueKey('chapter:${_chapter.key}'),
           controller: _scroll,
           padding: EdgeInsets.zero,
           itemCount: pages.length + 1,
@@ -450,8 +523,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                                   onChanged: (v) =>
                                       setState(() => _page = v.round()),
                                   onChangeEnd: (v) {
+                                    _pageOffset = 0;
                                     _jumpTo(v.round());
-                                    _scheduleSave();
                                   },
                                 ),
                               ),

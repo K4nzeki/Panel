@@ -117,7 +117,10 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
   }
 
   /// Applies a column patch (e.g. from the update check) to one title.
+  /// New-chapter info only: reading progress is stripped, so new chapters
+  /// coming out move `latest_chapter` and never `chapter`.
   Future<void> _patch(String id, Map<String, dynamic> patch) async {
+    patch = LocalStore.withoutProgress(patch);
     if (patch.isEmpty) return;
     _set([
       for (final e in _current)

@@ -46,10 +46,30 @@ class LocalStore {
 
   // ---- Patches from the background job ----
 
+  /// Columns only you (or the reader, when you finish a chapter) change.
+  /// New-chapter checks may update the newest chapter, total, cover … but
+  /// never these, so a chapter coming out can't count as one you've read.
+  static const progressColumns = {
+    'chapter',
+    'reread',
+    'status',
+    'last_read_at',
+  };
+
+  /// [patch] without [progressColumns].
+  static Map<String, dynamic> withoutProgress(Map<String, dynamic> patch) =>
+      patch.keys.any(progressColumns.contains)
+          ? {
+              for (final e in patch.entries)
+                if (!progressColumns.contains(e.key)) e.key: e.value,
+            }
+          : patch;
+
   /// Saves [patch] (entry columns, e.g. `latest_chapter`) for entry [id].
   /// Used only by the background isolate.
   static Future<void> addBackgroundPatch(
       String id, Map<String, dynamic> patch) async {
+    patch = withoutProgress(patch);
     if (patch.isEmpty) return;
     final prefs = await _prefs(reload: true);
     final all = _decodePatches(prefs.getString(_bgPatchesKey));
@@ -72,7 +92,10 @@ class LocalStore {
     if (patches.isEmpty) return list;
     return [
       for (final e in list)
-        if (patches[e.id] case final p?) applyPatch(e, p) else e,
+        if (patches[e.id] case final p?)
+          applyPatch(e, withoutProgress(p))
+        else
+          e,
     ];
   }
 
@@ -82,10 +105,15 @@ class LocalStore {
 
   // ---- Stats (chapters per day, finishes per month) ----
 
-  /// Records what a change from [before] to [after] means for Stats. Same
-  /// rules the server used to apply: a move into Finished or an extra
-  /// reread is one finish this month; chapters going up count as read
-  /// today; going down for a reread counts the new chapter number.
+  /// Records what a change from [before] to [after] means for Stats: a move
+  /// into Finished or an extra reread is one finish this month, and only
+  /// chapters *read* count for today — the chapter number going up.
+  ///
+  /// Anything else never counts as reading: the newest chapter / total
+  /// going up (a new chapter came out), or the chapter going down (fixing
+  /// a mistake, starting a reread). Going down used to count the whole new
+  /// chapter number as read today, so a −1 correction from 50 to 49 logged
+  /// 49 chapters.
   static Future<void> recordActivity(
       Entry before, Entry after, Map<String, dynamic> patch) async {
     var finishes = 0;
@@ -98,14 +126,7 @@ class LocalStore {
         patch.containsKey('reread') ? after.reread - before.reread : 0;
     if (rereadDelta > 0) finishes += rereadDelta;
 
-    var chapters = 0;
-    if (patch.containsKey('chapter') &&
-        after.chapter != before.chapter &&
-        !(rereadDelta > 0 && after.chapter < before.chapter)) {
-      chapters = after.chapter > before.chapter
-          ? after.chapter - before.chapter
-          : after.chapter;
-    }
+    final chapters = chaptersReadDelta(before, after, patch);
     if (finishes <= 0 && chapters <= 0) return;
 
     final prefs = await _prefs();
@@ -127,6 +148,16 @@ class LocalStore {
     }
     await prefs.setString(
         _activityKey, jsonEncode({'days': a.days, 'months': a.months}));
+  }
+
+  /// Chapters a change counts as read: how far the chapter number moved
+  /// forward, 0 otherwise. Only the `chapter` column counts — never
+  /// `latest_chapter` or `total_chapters`.
+  static int chaptersReadDelta(
+      Entry before, Entry after, Map<String, dynamic> patch) {
+    if (!patch.containsKey('chapter')) return 0;
+    final d = after.chapter - before.chapter;
+    return d > 0 ? d : 0;
   }
 
   /// Chapters read per local day for the last [days] days (oldest first).

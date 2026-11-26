@@ -50,18 +50,25 @@ Future<void> resumeReading(BuildContext context, WidgetRef ref, Entry entry) asy
     showSnack(context, "You're caught up — opening the latest chapter.");
   }
   await openReader(context, entry.id, target.order, target.index,
-      page: target.page);
+      page: target.page, offset: target.offset);
 }
 
 Future<void> openChapters(BuildContext context, String entryId) =>
     Navigator.of(context).push(MaterialPageRoute<void>(
         builder: (_) => ChaptersScreen(entryId: entryId)));
 
+/// Opens the reader at [order][index], on [page] and [offset] (0..1 down
+/// that page) — the exact spot you stopped at when resuming.
 Future<void> openReader(BuildContext context, String entryId,
-        List<ChapterInfo> order, int index, {int page = 0}) =>
+        List<ChapterInfo> order, int index,
+        {int page = 0, double offset = 0}) =>
     Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => ReaderScreen(
-          entryId: entryId, order: order, index: index, startPage: page),
+          entryId: entryId,
+          order: order,
+          index: index,
+          startPage: page,
+          startOffset: offset),
     ));
 
 /// Lets you choose where [entry] is read from. Returns true if one was
@@ -252,9 +259,7 @@ class _ChaptersBody extends ConsumerWidget {
           : FloatingActionButton.extended(
               onPressed: () => resumeReading(context, ref, entry),
               icon: const Icon(Icons.play_arrow_rounded),
-              label: Text(link.hasProgress || entry.chapter > 0
-                  ? 'Resume'
-                  : 'Start reading'),
+              label: Text(readButtonLabel(entry, link, list.chapters)),
             ),
       body: RefreshIndicator(
         onRefresh: notifier.refresh,
@@ -472,8 +477,10 @@ class _ChapterTile extends ConsumerWidget {
       var i = order.indexWhere((x) => x.key == chapter.key);
       final o = i < 0 ? [chapter] : order;
       if (i < 0) i = 0;
-      final page = isLast && !link.lastFinished ? link.lastPage : 0;
-      openReader(context, entry.id, o, i, page: page);
+      final resume = isLast && !link.lastFinished;
+      openReader(context, entry.id, o, i,
+          page: resume ? link.lastPage : 0,
+          offset: resume ? link.lastPageOffset : 0);
     }
 
     final Widget trailing;

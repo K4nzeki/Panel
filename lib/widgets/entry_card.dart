@@ -12,7 +12,7 @@ import 'common.dart';
 import 'entry_sheet.dart';
 
 String chapterLabel(Entry e) {
-  final total = e.totalChapters;
+  final total = e.knownChapters;
   if (e.status == EntryStatus.toRead && e.chapter == 0) {
     return total != null ? '$total chapters' : 'Not started';
   }
@@ -156,9 +156,8 @@ class ResumeButton extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.colors;
-    final started = ref.watch(readingLinksProvider
-            .select((m) => m[entry.id]?.hasProgress ?? false)) ||
-        entry.chapter > 0;
+    final link = ref.watch(readingLinksProvider.select((m) => m[entry.id]));
+    final started = (link?.hasProgress ?? false) || entry.chapter > 0;
     Future<void> go() async {
       try {
         await resumeReading(context, ref, entry);
@@ -167,7 +166,9 @@ class ResumeButton extends ConsumerWidget {
       }
     }
 
-    final label = started ? 'Resume' : 'Start reading';
+    // Bookmark only (no chapter list): cards don't fetch every title's
+    // chapters just for a tooltip.
+    final label = readButtonLabel(entry, link, const []);
     if (compact) {
       return Tooltip(
         message: label,

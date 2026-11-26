@@ -177,12 +177,29 @@ class ReadingLinksNotifier extends Notifier<Map<String, ReadingLink>> {
     if (l != null) _put(entryId, l.copyWith(scanlators: scanlators));
   }
 
-  /// Where you are in the reader. [finished] = you reached the last page.
+  /// Where you are in the reader: chapter, page and how far down that page
+  /// ([offset], 0..1). Saved on the phone per title, so it survives closing
+  /// the app. [finished] = you reached the last page.
+  ///
+  /// Only the reader's bookmark changes here. The library's chapter count
+  /// (chapters read) moves separately, when you actually finish a chapter.
   void saveProgress(String entryId, ChapterInfo chapter,
-      {required int page, int? pageCount, bool finished = false}) {
+      {required int page,
+      double offset = 0,
+      int? pageCount,
+      bool finished = false}) {
     final l = state[entryId];
     if (l == null) return;
     final sameChapter = l.lastChapterKey == chapter.key;
+    final o = offset.isFinite ? offset.clamp(0.0, 1.0).toDouble() : 0.0;
+    // Nothing moved: skip the write (the reader saves often).
+    if (sameChapter &&
+        l.lastPage == page &&
+        (l.lastPageOffset - o).abs() < 0.01 &&
+        l.lastPageCount == pageCount &&
+        l.lastFinished == (finished || l.lastFinished)) {
+      return;
+    }
     _put(
       entryId,
       l.copyWith(
@@ -190,6 +207,7 @@ class ReadingLinksNotifier extends Notifier<Map<String, ReadingLink>> {
         lastChapterNumber: chapter.number,
         lastScanlator: chapter.scanlatorLabel,
         lastPage: page,
+        lastPageOffset: o,
         lastPageCount: pageCount,
         // Once finished, scrolling back up doesn't un-finish a chapter.
         lastFinished: finished || (sameChapter && l.lastFinished),
@@ -342,13 +360,17 @@ final chaptersProvider =
 // ---------------------------------------------------------------------------
 
 class ResumeTarget {
-  const ResumeTarget(this.order, this.index, this.page, {this.caughtUp = false});
+  const ResumeTarget(this.order, this.index, this.page,
+      {this.offset = 0, this.caughtUp = false});
 
   /// Oldest-first chapters the reader moves through (scanlator filter
   /// applied, one release per chapter number).
   final List<ChapterInfo> order;
   final int index;
+
+  /// 0-based page to open at, and how far down it (0..1).
   final int page;
+  final double offset;
 
   /// Every chapter is read; [index] is the last one.
   final bool caughtUp;
@@ -373,7 +395,10 @@ ResumeTarget? resolveResume(Entry e, ReadingLink link, List<ChapterInfo> all) {
         : order.indexWhere((c) => c.key == link.lastChapterKey);
     if (i < 0 && lastN != null) i = order.indexWhere((c) => c.number == lastN);
     if (i >= 0) {
-      if (!link.lastFinished) return ResumeTarget(order, i, link.lastPage);
+      if (!link.lastFinished) {
+        return ResumeTarget(order, i, link.lastPage,
+            offset: link.lastPageOffset);
+      }
       if (i + 1 < order.length) return ResumeTarget(order, i + 1, 0);
       return ResumeTarget(order, i, 0, caughtUp: true);
     }
@@ -382,4 +407,49 @@ ResumeTarget? resolveResume(Entry e, ReadingLink link, List<ChapterInfo> all) {
   final next = order.indexWhere((c) => c.number != null && c.number! > e.chapter);
   if (next >= 0) return ResumeTarget(order, next, 0);
   return ResumeTarget(order, order.length - 1, 0, caughtUp: true);
+}
+
+// ---------------------------------------------------------------------------
+// The main read button
+// ---------------------------------------------------------------------------
+
+/// "Ch. 12", "Ch. 12.5", or the chapter's name when it has no number.
+String chapterButtonLabel(ChapterInfo c) {
+  final n = c.number;
+  if (n == null) return c.name;
+  return n == n.roundToDouble() ? 'Ch. ${n.toInt()}' : 'Ch. $n';
+}
+
+String _num(double n) => n == n.roundToDouble() ? '${n.toInt()}' : '$n';
+
+/// What the main read button says: "Start Reading" for a title you haven't
+/// started, otherwise "Continue Reading: Ch. 12, Page 4" — exactly where
+/// Resume will open. Uses [chapters] (the title's chapter list, if loaded)
+/// to work out the next chapter after a finished one; without it, falls
+/// back to the saved bookmark.
+String readButtonLabel(
+    Entry e, ReadingLink? link, List<ChapterInfo> chapters) {
+  final started = (link?.hasProgress ?? false) || e.chapter > 0;
+  if (!started) return 'Start Reading';
+
+  if (link != null && chapters.isNotEmpty) {
+    final t = resolveResume(e, link, chapters);
+    if (t != null) {
+      if (t.caughtUp) return 'Caught up · ${chapterButtonLabel(t.chapter)}';
+      return 'Continue Reading: ${chapterButtonLabel(t.chapter)}, '
+          'Page ${t.page + 1}';
+    }
+  }
+
+  // No chapter list yet: go by the bookmark alone.
+  final n = link?.lastChapterNumber;
+  final aheadOfReader = n != null && e.chapter > n.floor();
+  if (link != null && link.hasProgress && !aheadOfReader) {
+    if (!link.lastFinished && n != null) {
+      return 'Continue Reading: Ch. ${_num(n)}, Page ${link.lastPage + 1}';
+    }
+    if (n != null) return 'Continue Reading: after Ch. ${_num(n)}';
+    return 'Continue Reading';
+  }
+  return 'Continue Reading: Ch. ${e.chapter + 1}';
 }
