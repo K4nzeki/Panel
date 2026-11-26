@@ -8,6 +8,7 @@ import 'package:intl/intl.dart';
 import '../../models/reader.dart';
 import '../extension_repo.dart';
 import 'reader_source.dart';
+import 'sites/site_adapter.dart';
 
 /// A manga website from an extension repo, read directly.
 ///
@@ -69,12 +70,21 @@ class SiteSource implements ReaderSource {
         'Accept': 'image/avif,image/webp,image/*,*/*',
       };
 
-  Future<dom.Document> _page(Uri uri, {Map<String, String>? form}) async {
+  /// This site's own reader, for sites that don't use a common theme.
+  late final SiteAdapter? _adapter = SiteAdapter.forUrl(base);
+
+  /// Loads a page of this site (used by site adapters too).
+  Future<dom.Document> fetchPage(Uri uri,
+          {Map<String, String>? form, Map<String, String>? headers}) =>
+      _page(uri, form: form, extra: headers);
+
+  Future<dom.Document> _page(Uri uri,
+      {Map<String, String>? form, Map<String, String>? extra}) async {
     final http.Response res;
     try {
       res = form == null
           ? await _client
-              .get(uri, headers: _headers)
+              .get(uri, headers: {..._headers, ...?extra})
               .timeout(const Duration(seconds: 20))
           : await _client
               .post(uri,
@@ -104,21 +114,56 @@ class SiteSource implements ReaderSource {
   Future<List<SourceSeries>> search(String query) async {
     final q = query.trim();
     if (q.isEmpty) return const [];
+    if (_adapter case final a?) return a.search(this, q);
     final enc = Uri.encodeQueryComponent(q);
     SourceException? last;
+    var recognized = false;
     // Madara's manga search first, then the plain WordPress search.
     for (final url in ['$base/?s=$enc&post_type=wp-manga', '$base/?s=$enc']) {
       try {
         final uri = Uri.parse(url);
-        final found = parseSearch(await _page(uri), uri);
+        final doc = await _page(uri);
+        final found = parseSearch(doc, uri);
         if (found.isNotEmpty) return found;
+        if (isSupportedSite(doc)) recognized = true;
       } on SourceException catch (e) {
         if (e.offline) rethrow;
         last = e;
       }
     }
+    // A real empty search on a site Panel can read.
+    if (recognized) return const [];
     if (last != null) throw last;
-    return const [];
+    // The site answered, but with a layout Panel doesn't understand
+    // (custom-built sites like Asura, Flame, Weeb Central, MangaFire…).
+    // Saying "No results" here would be wrong — the title may well be there.
+    throw SourceException(
+        "$name uses its own site layout, which Panel can't read yet. "
+        'Try another source.');
+  }
+
+  /// Whether a page comes from a site theme Panel can read (Madara or
+  /// MangaThemesia, both WordPress). Public for tests.
+  static bool isSupportedSite(dom.Document doc) {
+    const markers = '.c-tabs-item, .c-tabs-item__content, .page-item-detail, '
+        '.search-wrap, .wp-manga-chapter, .listupd, .bsx, #chapterlist';
+    if (doc.querySelector(markers) != null) return true;
+    final body = doc.body?.className ?? '';
+    if (body.contains('wp-manga') || body.contains('madara')) return true;
+    // Theme files: wp-content/themes/madara…, mangareader, mangastream.
+    for (final el in doc.querySelectorAll('link[href], script[src]')) {
+      final src = (el.attributes['href'] ?? el.attributes['src'] ?? '')
+          .toLowerCase();
+      if (src.contains('/wp-content/themes/') &&
+          (src.contains('madara') ||
+              src.contains('mangareader') ||
+              src.contains('mangastream') ||
+              src.contains('themesia'))) {
+        return true;
+      }
+      if (src.contains('/wp-content/plugins/madara')) return true;
+    }
+    return false;
   }
 
   /// Search results on a Madara or MangaThemesia page. Public for tests.
@@ -162,6 +207,7 @@ class SiteSource implements ReaderSource {
 
   @override
   Future<List<ChapterInfo>> chapters(String seriesKey) async {
+    if (_adapter case final a?) return a.chapters(this, seriesKey);
     final uri = Uri.parse(seriesKey);
     final doc = await _page(uri);
     var list = parseChapterList(doc, uri, name);
@@ -258,6 +304,7 @@ class SiteSource implements ReaderSource {
 
   @override
   Future<List<String>> pages(ChapterInfo chapter) async {
+    if (_adapter case final a?) return a.pages(this, chapter);
     final uri = Uri.parse(chapter.url ?? chapter.key);
     // Madara shows every page at once with style=list; others ignore it.
     final target = uri.queryParameters.containsKey('style')

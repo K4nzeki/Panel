@@ -5,6 +5,8 @@ import 'package:panel/models/reader.dart';
 import 'package:panel/services/local_store.dart';
 import 'package:panel/services/mangadex.dart';
 import 'package:panel/services/sources/site_source.dart';
+import 'package:panel/services/sources/sites/site_adapter.dart';
+import 'package:panel/services/sources/sites/weeb_central.dart';
 import 'package:panel/state/reader.dart';
 
 ChapterInfo ch(String key, double? n, {String group = 'A'}) =>
@@ -164,6 +166,75 @@ void main() {
       expect(r.single.title, 'Solo Leveling');
       expect(r.single.key, 'https://example.com/manga/solo/');
       expect(r.single.coverUrl, 'https://example.com/c.jpg');
+    });
+
+    test('tells supported site themes from custom-built sites', () {
+      // Madara search with zero hits: still a site Panel can read.
+      expect(
+          SiteSource.isSupportedSite(html_parser.parse(
+              '<div class="search-wrap"><p>No matches</p></div>')),
+          isTrue);
+      expect(
+          SiteSource.isSupportedSite(html_parser.parse(
+              '<link href="/wp-content/themes/mangareader/style.css">')),
+          isTrue);
+      // A Next.js-style site: Panel can't read it, so no "No results".
+      expect(
+          SiteSource.isSupportedSite(html_parser.parse(
+              '<div id="__next"><script src="/_next/static/app.js"></script></div>')),
+          isFalse);
+    });
+  });
+
+  group('Weeb Central', () {
+    test('is picked by host', () {
+      expect(SiteAdapter.forUrl('https://weebcentral.com'), isA<WeebCentral>());
+      expect(SiteAdapter.forUrl('https://example.com'), isNull);
+    });
+
+    test('search results', () {
+      final page = Uri.parse('https://weebcentral.com/search/data?text=double');
+      final doc = html_parser.parse('''
+        <article class="bg-base-300"><section class="w-full">
+          <a href="https://weebcentral.com/series/01J76XYABC/Double-Click">
+            <picture><img src="https://temp.compsci88.com/cover/normal/01J76XYABC.webp" alt="Double Click cover"></picture>
+            <div class="text-ellipsis truncate text-white text-center text-lg z-20 w-[90%]">Double Click</div>
+          </a></section>
+          <section><a href="https://weebcentral.com/series/01J76XYABC/Double-Click">Double Click</a></section>
+        </article>''');
+      final r = WeebCentral.parseSearch(doc, page);
+      expect(r.single.title, 'Double Click');
+      expect(r.single.key, 'https://weebcentral.com/series/01J76XYABC/Double-Click');
+      expect(r.single.coverUrl, contains('01J76XYABC.webp'));
+      expect(WeebCentral.seriesId(r.single.key), '01J76XYABC');
+    });
+
+    test('chapter list', () {
+      final page = Uri.parse('https://weebcentral.com/series/01J76XYABC/full-chapter-list');
+      final doc = html_parser.parse('''
+        <div x-data="{}"><a href="https://weebcentral.com/chapters/01JCH2">
+          <span class="flex"><span>Chapter 2</span><span>Last Read</span></span>
+          <time datetime="2026-11-20T10:00:00.000Z">Nov 20</time></a></div>
+        <div x-data="{}"><a href="https://weebcentral.com/chapters/01JCH1">
+          <span class="flex"><span>Chapter 1</span></span></a></div>''');
+      final list = WeebCentral.parseChapters(doc, page, 'Weeb Central');
+      expect(list.map((c) => c.number), [2, 1]);
+      expect(list.first.name, 'Chapter 2');
+      expect(list.first.uploadedAt?.year, 2026);
+      expect(list.first.key, 'https://weebcentral.com/chapters/01JCH2');
+    });
+
+    test('pages', () {
+      final page = Uri.parse('https://weebcentral.com/chapters/01JCH1/images');
+      final doc = html_parser.parse('''
+        <section x-data="{ scroll() {} }">
+          <img src="https://hot.planeptune.us/manga/Double-Click/0001-001.png">
+          <img src="https://hot.planeptune.us/manga/Double-Click/0001-002.png">
+        </section>''');
+      expect(WeebCentral.parsePages(doc, page), [
+        'https://hot.planeptune.us/manga/Double-Click/0001-001.png',
+        'https://hot.planeptune.us/manga/Double-Click/0001-002.png',
+      ]);
     });
   });
 
