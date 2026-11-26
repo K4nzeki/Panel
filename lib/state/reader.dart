@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/entry.dart';
 import '../models/reader.dart';
 import '../services/chapter_cache.dart';
+import '../services/sources/apk_source.dart';
 import '../services/sources/mangadex_source.dart';
 import '../services/sources/reader_source.dart';
 import '../services/sources/site_source.dart';
@@ -29,13 +30,15 @@ class ReaderSourceRegistry {
 
   final MangaDexSource mangadex;
 
-  /// Sites of the extensions installed on the phone.
-  final List<SiteSource> installed;
+  /// Sources of the extensions installed on the phone: on Android, trusted
+  /// extensions run natively ([ApkSource]); the rest are read as websites
+  /// ([SiteSource]).
+  final List<ReaderSource> installed;
 
   /// Other (non-18+) sites listed by your repos, not installed.
   final List<SiteSource> available;
 
-  final Map<String, SiteSource> _byId;
+  final Map<String, ReaderSource> _byId;
 
   /// Searched together when picking a source for a title.
   List<ReaderSource> get primary => [mangadex, ...installed];
@@ -46,6 +49,14 @@ class ReaderSourceRegistry {
     if (l.sourceId == MangaDexSource.sourceId) return mangadex;
     final known = _byId[l.sourceId];
     if (known != null) return known;
+    if (l.sourceId.startsWith(ApkSource.prefix)) {
+      // Extension uninstalled or untrusted (or not on Android): explains itself.
+      return ApkSource.missing(
+          id: l.sourceId,
+          name: l.sourceName,
+          lang: l.sourceLang,
+          baseUrl: l.sourceBaseUrl);
+    }
     final base = l.sourceBaseUrl ?? l.sourceId.replaceFirst('site:', '');
     return SiteSource(name: l.sourceName, lang: l.sourceLang, baseUrl: base);
   }
@@ -56,22 +67,35 @@ final readerSourcesProvider = Provider<ReaderSourceRegistry>((ref) {
   ref.watch(extensionStoreProvider
       .select((s) => (s.repoUrls, s.repos, s.installed)));
   final store = ref.read(extensionStoreProvider);
+  // Installed extensions Panel runs natively (Android, trusted).
+  final apk = ref.watch(apkExtensionsProvider);
+  final native = {for (final s in apk.sources) s.pkg};
   final seen = <String>{};
-  final installed = <SiteSource>[];
+  final installed = <ReaderSource>[
+    for (final s in apk.sources)
+      // MangaDex is built in (through its API).
+      if (!(s.baseUrl ?? '').contains('mangadex.org') && seen.add(s.id)) s,
+  ];
   final available = <SiteSource>[];
   for (final e in store.extensions) {
     final isInstalled = store.isInstalled(e);
     if (!isInstalled && e.isNsfw) continue;
+    // Runs natively: its own code replaces Panel's website reader.
+    if (isInstalled && native.contains(e.pkg)) continue;
     for (final s in e.sources) {
       // MangaDex is built in (through its API).
       if (s.baseUrl.contains('mangadex.org')) continue;
       final src = SiteSource.fromExt(s);
       if (!seen.add(src.id)) continue;
-      (isInstalled ? installed : available).add(src);
+      if (isInstalled) {
+        installed.add(src);
+      } else {
+        available.add(src);
+      }
     }
   }
-  int rank(SiteSource s) => switch (s.lang) { 'en' => 0, 'all' => 1, _ => 2 };
-  int order(SiteSource a, SiteSource b) {
+  int rank(ReaderSource s) => switch (s.lang) { 'en' => 0, 'all' => 1, _ => 2 };
+  int order(ReaderSource a, ReaderSource b) {
     final r = rank(a).compareTo(rank(b));
     return r != 0 ? r : a.name.toLowerCase().compareTo(b.name.toLowerCase());
   }
@@ -124,7 +148,11 @@ class ReadingLinksNotifier extends Notifier<Map<String, ReadingLink>> {
   /// number you were on so Resume still lands in the right place.
   void choose(String entryId, ReaderSource source, SourceSeries series) {
     final old = state[entryId];
-    final base = source is SiteSource ? source.base : null;
+    final base = switch (source) {
+      SiteSource s => s.base,
+      ApkSource s => s.baseUrl,
+      _ => null,
+    };
     final link = old != null
         ? old.movedTo(
             sourceId: source.id,

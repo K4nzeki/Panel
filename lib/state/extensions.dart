@@ -12,6 +12,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/extension_covers.dart';
 import '../services/extension_repo.dart';
+import '../services/sources/apk_source.dart';
 import 'providers.dart';
 
 /// An extension app that's on the phone.
@@ -312,3 +313,72 @@ class ExtensionStoreNotifier extends Notifier<ExtensionStoreState> {
 final extensionStoreProvider =
     NotifierProvider<ExtensionStoreNotifier, ExtensionStoreState>(
         ExtensionStoreNotifier.new);
+
+// ---------------------------------------------------------------------------
+// Extensions run natively (Android)
+// ---------------------------------------------------------------------------
+
+/// The installed extensions Panel runs itself, and the ones waiting to be
+/// trusted. Reloads when apps are installed/removed or your repos change
+/// (a repo's signing key makes its extensions trusted).
+class ApkExtensionsNotifier extends Notifier<ApkExtensions> {
+  int _gen = 0;
+  ApkExtensions _last = const ApkExtensions();
+
+  @override
+  ApkExtensions build() {
+    if (!ApkBridge.supported) return const ApkExtensions();
+    final keys = ref.watch(extensionStoreProvider.select(_repoKeys));
+    ref.watch(extensionStoreProvider.select((s) => s.installed));
+    final gen = ++_gen;
+    unawaited(Future.microtask(() => _load(gen, keys)));
+    return _last;
+  }
+
+  /// Signing keys of every repo, or null while the repos aren't known yet
+  /// (then the keys saved on the Android side are used as they are).
+  static String? _repoKeys(ExtensionStoreState s) {
+    final known = (!s.loading || s.repoUrls.isNotEmpty) &&
+        s.repoUrls.every(s.repos.containsKey);
+    if (!known) return null;
+    final keys = <String>{
+      for (final r in s.repos.values)
+        if (r.fingerprint case final f? when f.trim().isNotEmpty) f.trim(),
+    }.toList()
+      ..sort();
+    return keys.join(',');
+  }
+
+  Future<void> _load(int gen, String? keys, {bool reload = false}) async {
+    try {
+      if (keys != null) {
+        await ApkBridge.setTrustedKeys(keys.split(',').where((k) => k.isNotEmpty));
+      }
+      final next = await ApkBridge.load(reload: reload);
+      if (!ref.mounted || gen != _gen) return;
+      _last = next;
+      state = next;
+    } catch (_) {
+      // Older build without the native side, or a broken extension list:
+      // keep what we had; website sources still work.
+    }
+  }
+
+  /// Loads everything again (after trusting, or "reload extensions").
+  Future<void> refresh({bool reload = false}) =>
+      _load(++_gen, _repoKeys(ref.read(extensionStoreProvider)), reload: reload);
+
+  Future<void> trust(String pkg, String signature) async {
+    await ApkBridge.trust(pkg, signature);
+    await refresh();
+  }
+
+  Future<void> untrust(String pkg) async {
+    await ApkBridge.untrust(pkg);
+    await refresh();
+  }
+}
+
+final apkExtensionsProvider =
+    NotifierProvider<ApkExtensionsNotifier, ApkExtensions>(
+        ApkExtensionsNotifier.new);

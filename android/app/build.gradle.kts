@@ -1,5 +1,7 @@
 plugins {
     id("com.android.application")
+    // Kotlin code for running Mihon extensions (android/app/src/main/kotlin).
+    id("org.jetbrains.kotlin.android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
 }
@@ -36,6 +38,31 @@ android {
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+            // Extensions call into classes Panel itself never uses (the
+            // extension API, OkHttp, Jsoup, RxJava...). Without these rules R8
+            // would strip or rename them and every extension would crash.
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+        }
+    }
+
+    packaging {
+        resources {
+            // Same license/metadata files shipped by several of the libraries below.
+            excludes += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/LICENSE.md",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+                "META-INF/NOTICE.md",
+                "META-INF/README.md",
+                "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+                "kotlin-tooling-metadata.json",
+            )
         }
     }
 }
@@ -54,6 +81,22 @@ dependencies {
     // AppCompat themes in res/values*/styles.xml.
     implementation("androidx.appcompat:appcompat:1.7.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+
+    // ---- Runtime for Mihon / Tachiyomi extensions ----
+    // Extensions are compiled against stubs and expect the host app to provide
+    // these libraries (same artifacts and versions Mihon ships).
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.13.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json-okio:1.13.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-protobuf:1.13.0")
+    implementation("com.squareup.okhttp3:okhttp:5.5.1")
+    implementation("com.squareup.okhttp3:okhttp-brotli:5.5.1")
+    implementation("com.squareup.okio:okio:3.18.2")
+    implementation("org.jsoup:jsoup:1.24.1")
+    implementation("io.reactivex:rxjava:1.3.8")
+    implementation("uy.kohesive.injekt:injekt-core:1.16.1")
+    implementation("androidx.preference:preference-ktx:1.2.1")
 }
 
 // After `flutter build apk --release`, also save the APK as

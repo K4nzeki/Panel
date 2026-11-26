@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../config.dart';
 import '../models/reader.dart';
+import 'sources/reader_source.dart';
 
 /// A chapter saved on the phone.
 class DownloadedChapter {
@@ -186,10 +187,22 @@ class DownloadStore {
 
   /// Downloads one page image to [dir] as `NNN.ext`; returns the file name.
   static Future<String> savePage(http.Client client, String url, int index,
-      Directory dir, Map<String, String> headers) async {
+      Directory dir, Map<String, String> headers,
+      {ImageFetcher? fetcher}) async {
     Object? lastError;
     for (var attempt = 0; attempt < 3; attempt++) {
       try {
+        if (fetcher != null) {
+          // Extension sources load their own images (headers, cookies...).
+          final img = await fetcher
+              .fetchImage(url)
+              .timeout(const Duration(seconds: 90));
+          final name = '${(index + 1).toString().padLeft(3, '0')}.'
+              '${_extFor(img.contentType ?? '', '')}';
+          await File('${dir.path}${Platform.pathSeparator}$name')
+              .writeAsBytes(img.bytes, flush: true);
+          return name;
+        }
         final res = await client
             .get(Uri.parse(url), headers: headers)
             .timeout(const Duration(seconds: 45));
@@ -204,14 +217,17 @@ class DownloadStore {
       } catch (e) {
         lastError = e;
         if (e is SocketException) rethrow; // offline: don't keep trying
+        if (e is SourceException && e.offline) rethrow;
         await Future<void>.delayed(Duration(seconds: 1 + attempt * 2));
       }
     }
     throw lastError ?? const HttpException('Download failed');
   }
 
-  static String _ext(http.Response res, String url) {
-    final type = res.headers['content-type'] ?? '';
+  static String _ext(http.Response res, String url) =>
+      _extFor(res.headers['content-type'] ?? '', url);
+
+  static String _extFor(String type, String url) {
     if (type.contains('png')) return 'png';
     if (type.contains('webp')) return 'webp';
     if (type.contains('gif')) return 'gif';

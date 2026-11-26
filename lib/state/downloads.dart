@@ -290,9 +290,13 @@ class DownloadsNotifier extends Notifier<DownloadsState> {
       }
       try {
         files.add(await DownloadStore.savePage(
-            _client, urls[i], i, dir, source.imageHeaders));
+            _client, urls[i], i, dir, source.imageHeaders,
+            fetcher: source is ImageFetcher ? source as ImageFetcher : null));
       } on SocketException {
         throw const _Offline();
+      } on SourceException catch (e) {
+        if (e.offline) throw const _Offline();
+        rethrow;
       }
       state = state.copyWith(activeDone: i + 1);
       unawaited(Notifications.showProgress(Notifications.downloadProgressId,

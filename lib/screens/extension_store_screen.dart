@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../services/extension_repo.dart';
+import '../services/sources/apk_source.dart';
 import '../state/extensions.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
@@ -45,6 +46,11 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
     final store = ref.watch(extensionStoreProvider);
     final notifier = ref.read(extensionStoreProvider.notifier);
     final c = context.colors;
+    // Installed extensions no repo of yours lists (sideloaded, or from a
+    // repo you removed). Shown under Installed.
+    final others = _otherInstalled(ref.watch(apkExtensionsProvider), store);
+    // Nothing to browse without repos: show what's installed instead.
+    final installedOnly = _installedOnly || store.repoUrls.isEmpty;
 
     final all = store.extensions;
     final langs = {for (final e in all) e.lang}.toList()
@@ -54,7 +60,7 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
     final q = _search.text.trim().toLowerCase();
     final shown = all.where((e) {
       if (q.isNotEmpty && !e.name.toLowerCase().contains(q)) return false;
-      if (_installedOnly) return store.isInstalled(e);
+      if (installedOnly) return store.isInstalled(e);
       if (!_showNsfw && e.isNsfw) return false;
       if (lang != null && lang != '*' && e.lang != lang && e.lang != 'all') {
         return false;
@@ -99,7 +105,7 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
               icon: const Icon(Icons.add_link_rounded),
               label: const Text('Add repo'),
             ),
-      body: store.repoUrls.isEmpty
+      body: store.repoUrls.isEmpty && others.isEmpty
           ? EmptyState(
               icon: Icons.extension_outlined,
               title: 'Add an extension repo',
@@ -150,7 +156,7 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
                                   ? 'Installed ($installedCount · $updates update${updates == 1 ? '' : 's'})'
                                   : 'Installed ($installedCount)')),
                         ],
-                        selected: {_installedOnly},
+                        selected: {installedOnly},
                         onSelectionChanged: (s) =>
                             setState(() => _installedOnly = s.first),
                       ),
@@ -170,7 +176,7 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
                                 ),
                         ),
                       ),
-                      if (!_installedOnly) ...[
+                      if (!installedOnly) ...[
                         const SizedBox(height: 8),
                         Wrap(spacing: 8, children: [
                           PopupMenuButton<String>(
@@ -197,15 +203,20 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
                           ),
                         ]),
                       ],
-                      if (_installedOnly && installedCount > 0)
+                      if (installedOnly && installedCount > 0)
                         Padding(
                           padding: const EdgeInsets.only(top: 12),
                           child: Text(
-                            'Panel reads chapters from these sites directly '
-                            '(pick one as a title\'s source) and searches them '
-                            'for missing covers. Sites using the Madara or '
-                            'MangaThemesia themes work; others need a reader '
-                            'app like Mihon.',
+                            ExtensionStoreNotifier.supported
+                                ? 'Panel runs trusted extensions itself, so their '
+                                    'sites work like in Mihon (pick one as a '
+                                    'title\'s source). Untrusted ones are read as '
+                                    'plain websites: only Madara and '
+                                    'MangaThemesia sites work that way.'
+                                : 'Panel reads chapters from these sites directly '
+                                    '(pick one as a title\'s source) and searches '
+                                    'them for missing covers. Sites using the '
+                                    'Madara or MangaThemesia themes work.',
                             style: context.text.bodySmall
                                 ?.copyWith(color: c.onSurfaceVariant),
                           ),
@@ -215,29 +226,45 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
                   ),
                 ),
               ),
-              if (shown.isEmpty && !store.loading)
+              if (shown.isEmpty && !store.loading && !(installedOnly && others.isNotEmpty))
                 SliverFillRemaining(
                   hasScrollBody: false,
                   child: EmptyState(
-                    icon: _installedOnly
+                    icon: installedOnly
                         ? Icons.extension_off_outlined
                         : Icons.search_off_rounded,
-                    title: _installedOnly
+                    title: installedOnly
                         ? 'No extensions installed'
                         : 'Nothing matches',
-                    message: _installedOnly
+                    message: installedOnly
                         ? 'Install one from Browse.'
                         : 'Try another name or language.',
                   ),
                 )
               else
                 SliverPadding(
-                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 96),
+                  padding: EdgeInsets.fromLTRB(
+                      8, 0, 8, installedOnly && others.isNotEmpty ? 0 : 96),
                   sliver: SliverList.builder(
                     itemCount: shown.length,
                     itemBuilder: (_, i) => _ExtensionTile(ext: shown[i]),
                   ),
                 ),
+              if (installedOnly && others.isNotEmpty) ...[
+                const SliverToBoxAdapter(
+                  child: Padding(
+                    padding: EdgeInsets.fromLTRB(16, 8, 16, 0),
+                    child: SectionLabel('Other installed extensions'),
+                  ),
+                ),
+                SliverPadding(
+                  padding: const EdgeInsets.fromLTRB(8, 0, 8, 96),
+                  sliver: SliverList.builder(
+                    itemCount: others.length,
+                    itemBuilder: (_, i) => _OtherExtensionTile(ext: others[i]),
+                  ),
+                ),
+              ],
             ]),
     );
   }
@@ -247,6 +274,90 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
       context: context,
       showDragHandle: true,
       builder: (_) => const _ReposSheet(),
+    );
+  }
+}
+
+/// An installed extension that isn't in any of your repos.
+class _OtherExtension {
+  const _OtherExtension({
+    required this.pkg,
+    required this.name,
+    required this.version,
+    this.sources = 0,
+    this.error,
+  });
+  final String pkg;
+  final String name;
+  final String version;
+
+  /// Sources Panel runs from it (0 when it isn't loaded).
+  final int sources;
+
+  /// Why it isn't loaded (untrusted, unsupported...).
+  final ApkLoadError? error;
+}
+
+List<_OtherExtension> _otherInstalled(ApkExtensions apk, ExtensionStoreState store) {
+  final listed = {for (final e in store.extensions) e.pkg};
+  final loaded = <String, List<ApkSource>>{};
+  for (final s in apk.sources) {
+    if (!listed.contains(s.pkg)) (loaded[s.pkg] ??= []).add(s);
+  }
+  return [
+    for (final e in loaded.entries)
+      _OtherExtension(
+        pkg: e.key,
+        name: e.value.first.extName.isEmpty ? e.key : e.value.first.extName,
+        version: e.value.first.version,
+        sources: e.value.length,
+      ),
+    for (final err in apk.errors)
+      if (!listed.contains(err.pkg))
+        _OtherExtension(
+            pkg: err.pkg, name: err.name, version: err.version, error: err),
+  ]..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+}
+
+class _OtherExtensionTile extends ConsumerWidget {
+  const _OtherExtensionTile({required this.ext});
+  final _OtherExtension ext;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.colors;
+    final err = ext.error;
+    final status = err == null
+        ? '${ext.sources} source${ext.sources == 1 ? '' : 's'}'
+        : err.untrusted
+            ? 'Not trusted'
+            : err.reason;
+    return ListTile(
+      leading: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: SizedBox(
+            width: 42, height: 42, child: _ExtensionTile._fallbackIcon(c)),
+      ),
+      title: Text(ext.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: Text(
+        [if (ext.version.isNotEmpty) 'v${ext.version}', status].join(' · '),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+        style: err != null && !err.untrusted ? TextStyle(color: c.error) : null,
+      ),
+      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (err != null && err.untrusted && err.signature != null)
+          TextButton(
+            onPressed: () => _ExtensionTile._trust(context, ref, err),
+            child: const Text('Trust'),
+          ),
+        IconButton(
+          tooltip: 'Uninstall',
+          onPressed: () =>
+              ref.read(extensionStoreProvider.notifier).uninstall(ext.pkg),
+          icon: Icon(Icons.delete_outline_rounded, color: c.onSurfaceVariant),
+        ),
+      ]),
     );
   }
 }
@@ -264,6 +375,10 @@ class _ExtensionTile extends ConsumerWidget {
     final update = store.hasUpdate(ext);
     final downloading = store.downloading.containsKey(ext.pkg);
     final progress = store.downloading[ext.pkg];
+    // Installed, but Panel won't run its code until you trust its key.
+    final untrusted = installed
+        ? ref.watch(apkExtensionsProvider.select((a) => a.untrusted[ext.pkg]))
+        : null;
 
     Future<void> install() async {
       try {
@@ -296,11 +411,20 @@ class _ExtensionTile extends ConsumerWidget {
           onPressed: ExtensionStoreNotifier.supported ? install : null,
           child: const Text('Update'));
     } else if (installed) {
-      trailing = IconButton(
+      final uninstall = IconButton(
         tooltip: 'Uninstall',
         onPressed: () => notifier.uninstall(ext.pkg),
         icon: Icon(Icons.delete_outline_rounded, color: c.onSurfaceVariant),
       );
+      trailing = untrusted?.signature == null
+          ? uninstall
+          : Row(mainAxisSize: MainAxisSize.min, children: [
+              TextButton(
+                onPressed: () => _trust(context, ref, untrusted!),
+                child: const Text('Trust'),
+              ),
+              uninstall,
+            ]);
     } else {
       trailing = OutlinedButton(
           onPressed: ExtensionStoreNotifier.supported ? install : null,
@@ -322,13 +446,41 @@ class _ExtensionTile extends ConsumerWidget {
       ),
       title: Text(ext.name, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: Text(
-        installed && !update ? 'Installed · $details' : details,
+        untrusted != null
+            ? 'Installed · Not trusted · $details'
+            : installed && !update
+                ? 'Installed · $details'
+                : details,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),
       trailing: trailing,
       onTap: () => _showDetails(context, ext),
     );
+  }
+
+  /// Asks before Panel runs an extension's code.
+  static Future<void> _trust(
+      BuildContext context, WidgetRef ref, ApkLoadError e) async {
+    final key = e.signature!;
+    final short = key.length > 16 ? '${key.substring(0, 16)}…' : key;
+    final ok = await confirm(
+      context,
+      title: 'Trust ${e.name}?',
+      message: 'Panel will run this extension inside the app to read its '
+          'site. Extensions can do anything Panel can (use the internet, '
+          'see your installed apps), so only trust ones from people you '
+          'trust.\n\nSigning key: $short\n\nExtensions from a repo that '
+          'publishes its signing key are trusted automatically.',
+      action: 'Trust',
+    );
+    if (ok != true) return;
+    try {
+      await ref.read(apkExtensionsProvider.notifier).trust(e.pkg, key);
+      if (context.mounted) showSnack(context, '${e.name} is trusted.');
+    } catch (err) {
+      if (context.mounted) showSnack(context, err.toString(), error: true);
+    }
   }
 
   static Widget _fallbackIcon(ColorScheme c) => ColoredBox(

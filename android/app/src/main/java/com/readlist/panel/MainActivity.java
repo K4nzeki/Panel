@@ -11,6 +11,8 @@ import android.provider.Settings;
 import androidx.annotation.NonNull;
 import androidx.core.content.FileProvider;
 
+import com.readlist.panel.ext.ExtensionBridge;
+
 import java.io.File;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -29,6 +31,10 @@ public class MainActivity extends FlutterFragmentActivity {
     @Override
     public void configureFlutterEngine(@NonNull FlutterEngine flutterEngine) {
         super.configureFlutterEngine(flutterEngine);
+        // Mihon extension APKs, run natively (see android/app/src/main/kotlin).
+        ExtensionBridge extensions = new ExtensionBridge(this);
+        extensions.register(flutterEngine.getDartExecutor().getBinaryMessenger());
+        extensions.warmUp();
         new MethodChannel(flutterEngine.getDartExecutor().getBinaryMessenger(), CHANNEL)
                 .setMethodCallHandler((call, result) -> {
                     try {

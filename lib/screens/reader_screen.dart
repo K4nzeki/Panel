@@ -56,6 +56,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   List<_Page>? _pages;
   List<GlobalKey> _keys = const [];
   Map<String, String> _headers = const {};
+
+  /// Set for extension sources: they load their own images.
+  ImageFetcher? _fetcher;
   String? _error;
   bool _offline = false;
   bool _fromDownload = false;
@@ -119,6 +122,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         }
         final source = ref.read(readerSourcesProvider).forLink(link);
         _headers = source.imageHeaders;
+        _fetcher = source is ImageFetcher ? source as ImageFetcher : null;
         pages = [for (final u in await source.pages(ch)) _Page.net(u)];
         _fromDownload = false;
       }
@@ -335,6 +339,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
               child: _PageImage(
                 page: pages[i],
                 headers: _headers,
+                fetcher: _fetcher,
                 width: width,
                 cacheWidth: (width * dpr).round(),
               ),
@@ -506,10 +511,12 @@ class _PageImage extends StatefulWidget {
     required this.headers,
     required this.width,
     required this.cacheWidth,
+    this.fetcher,
   });
 
   final _Page page;
   final Map<String, String> headers;
+  final ImageFetcher? fetcher;
   final double width;
   final int cacheWidth;
 
@@ -561,6 +568,18 @@ class _PageImageState extends State<_PageImage> {
         width: widget.width,
         fit: BoxFit.fitWidth,
         cacheWidth: widget.cacheWidth,
+        gaplessPlayback: true,
+        frameBuilder: frame,
+        errorBuilder: error,
+      );
+    }
+    if (widget.fetcher case final fetcher?) {
+      return Image(
+        image: ResizeImage.resizeIfNeeded(widget.cacheWidth, null,
+            FetchedImageProvider(p.url!, fetcher, attempt: _attempt)),
+        key: ValueKey('${p.url}#$_attempt'),
+        width: widget.width,
+        fit: BoxFit.fitWidth,
         gaplessPlayback: true,
         frameBuilder: frame,
         errorBuilder: error,
