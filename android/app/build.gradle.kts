@@ -8,7 +8,9 @@ plugins {
 
 android {
     namespace = "com.readlist.panel"
-    compileSdk = flutter.compileSdkVersion
+    // At least 37: OkHttp 5.5+ (extension runtime below) requires it. Only the
+    // APIs the app compiles against change; targetSdk and minSdk stay as is.
+    compileSdk = maxOf(flutter.compileSdkVersion, 37)
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
