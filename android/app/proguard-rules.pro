@@ -29,6 +29,11 @@
 -dontwarn com.google.re2j.**
 -dontwarn javax.annotation.**
 
+# Apache Tika (file type detection in file_picker) can parse XML with the
+# desktop Java StAX API (javax.xml.stream), which Android doesn't have. That
+# path is never used on Android; without this R8 stops the release build.
+-dontwarn javax.xml.stream.**
+
 # The Cloudflare WebView calls back into Kotlin through @JavascriptInterface.
 -keepclassmembers class * {
     @android.webkit.JavascriptInterface <methods>;
