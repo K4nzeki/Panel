@@ -58,7 +58,7 @@ class _ListScreenState extends ConsumerState<ListScreen> {
         onRefresh: () async {
           await ref.read(entriesProvider.notifier).refresh(manual: true);
           // Pulled to refresh with no connection: say why nothing changed.
-          if (mounted && !ref.read(onlineProvider)) {
+          if (context.mounted && !ref.read(onlineProvider)) {
             showOfflineToast(context, force: true);
           }
         },
