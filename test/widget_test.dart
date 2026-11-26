@@ -1,13 +1,17 @@
 import 'package:material_ui/material_ui.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:panel/models/entry.dart';
 import 'package:panel/theme.dart';
 import 'package:panel/widgets/common.dart';
 
 void main() {
-  Widget wrap(Widget child, {bool dark = false}) => MaterialApp(
-        theme: dark ? AppTheme.dark() : AppTheme.light(),
-        home: Scaffold(body: Center(child: child)),
+  // CoverImage watches the connection state, so it needs a ProviderScope.
+  Widget wrap(Widget child, {bool dark = false}) => ProviderScope(
+        child: MaterialApp(
+          theme: dark ? AppTheme.dark() : AppTheme.light(),
+          home: Scaffold(body: Center(child: child)),
+        ),
       );
 
   testWidgets('StatusBadge shows the status label in both themes',

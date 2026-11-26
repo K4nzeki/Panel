@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/entry.dart';
 import '../services/anilist.dart';
 import '../services/background.dart';
+import '../services/cover_cache.dart';
 import '../services/extension_covers.dart';
 import '../services/local_store.dart';
 import '../services/mangadex.dart';
@@ -69,8 +70,9 @@ final themeModeProvider =
 // ---------------------------------------------------------------------------
 
 /// False after an online job (new chapters, covers, chapter lists) found no
-/// connection. Everything in the library keeps working; it's only shown so
-/// people know why new chapters / covers aren't updating.
+/// connection. Everything in the library keeps working (covers included,
+/// from [CoverCache]); it's only shown — as a small header icon and a short
+/// toast — so people know why new chapters / covers aren't updating.
 final onlineProvider = StateProvider<bool>((ref) => true);
 
 /// Progress of the background "find missing covers" job, or null when idle.
@@ -98,6 +100,7 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     final saved = LocalStore.applyPatches(await LocalStore.readEntries(),
         await LocalStore.takeBackgroundPatches());
     unawaited(LocalStore.writeEntries(saved));
+    _saveCovers(saved);
     // After the list is on screen: covers and the new-chapter check.
     unawaited(Future<void>.delayed(Duration.zero, refresh));
     return saved;
@@ -108,6 +111,20 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
   void _set(List<Entry> list) {
     state = AsyncData(list);
     unawaited(LocalStore.writeEntries(list));
+    _saveCovers(list);
+  }
+
+  String _coverUrls = '';
+
+  /// Saves the covers of every title in the list on the phone, so they show
+  /// offline. Only runs when a cover was added or changed (or [force], e.g.
+  /// to retry ones that failed while offline).
+  void _saveCovers(List<Entry> list, {bool force = false}) {
+    final urls = [for (final e in list) e.coverUrl ?? ''];
+    final key = urls.join('\n');
+    if (!force && key == _coverUrls) return;
+    _coverUrls = key;
+    unawaited(CoverCache.prefetch(urls));
   }
 
   void _setOnline(bool v) {
@@ -147,6 +164,8 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     final patches = await LocalStore.takeBackgroundPatches();
     if (patches.isNotEmpty) _set(LocalStore.applyPatches(_current, patches));
     if (!ref.read(onlineProvider)) await _probe();
+    // Covers that couldn't be saved last time (offline then).
+    if (ref.read(onlineProvider)) _saveCovers(_current, force: true);
     unawaited(fillMissingCovers());
     if (manual) {
       await checkUpdates(force: true);
@@ -156,7 +175,7 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
   }
 
   /// After being offline: a tiny request to see if the connection is back
-  /// (clears the "You're offline" banner even when nothing else is due).
+  /// (clears the offline icon even when nothing else is due).
   Future<void> _probe() async {
     try {
       final res = await http

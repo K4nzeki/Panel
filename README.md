@@ -37,8 +37,21 @@ Resume, chapter lists you've opened before (saved on the phone), the
 scanlator filter, the extension store (last copy of each repo is saved) and
 **reading downloaded chapters**. Online extras catch up automatically when
 the connection is back: new-chapter checks, missing covers, fresh chapter
-lists, repo updates and queued downloads. A small banner says when you're
-offline.
+lists, repo updates and queued downloads. **Covers** are saved on the phone
+the first time they load (every cover in your list is saved in the
+background), so cover art shows offline too. When the connection drops a
+short toast says so, and a small cloud icon sits in the library header
+until it's back (tap it to try again).
+
+## Reading modes (2.1)
+
+The reader has three layouts, picked in reader settings (the button at the
+top right of the reader): **Paged (Right to Left)**, **Paged (Left to
+Right)** and **Long Strip**. In the paged modes, swipe, tap the left or
+right side, or use the arrow keys to turn pages. Each title opens in the
+default for its type (manga right to left; manhwa, manhua and webtoons as a
+long strip; everything else left to right) until you pick a mode for it,
+which is then remembered for that title.
 
 ## Reading in the app (2.0)
 

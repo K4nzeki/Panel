@@ -11,6 +11,7 @@ import '../services/background.dart';
 import '../services/inbox.dart';
 import '../state/inbox.dart';
 import '../state/providers.dart';
+import '../widgets/common.dart';
 import '../widgets/update_dialog.dart';
 
 class HomeShell extends ConsumerStatefulWidget {
@@ -112,6 +113,11 @@ class _HomeShellState extends ConsumerState<HomeShell> {
         action: SnackBarAction(
             label: 'View', onPressed: () => _select(_updatesTab)),
       ));
+    });
+
+    // The connection dropped: a short toast instead of a banner.
+    ref.listen<bool>(onlineProvider, (was, now) {
+      if (was == true && !now) showOfflineToast(context);
     });
 
     return Scaffold(

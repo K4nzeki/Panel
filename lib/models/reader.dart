@@ -1,3 +1,41 @@
+/// How the reader lays out a chapter's pages.
+enum ReadingMode {
+  /// One page at a time; the next page is to the left (manga).
+  pagedRtl('paged_rtl', 'Paged (Right to Left)'),
+
+  /// One page at a time; the next page is to the right (comics).
+  pagedLtr('paged_ltr', 'Paged (Left to Right)'),
+
+  /// Pages stacked top to bottom with no gaps (webtoons).
+  longStrip('long_strip', 'Long Strip');
+
+  const ReadingMode(this.key, this.label);
+
+  /// Saved on the phone.
+  final String key;
+  final String label;
+
+  bool get paged => this != longStrip;
+
+  static ReadingMode? fromKey(Object? raw) {
+    for (final m in values) {
+      if (m.key == raw) return m;
+    }
+    return null;
+  }
+}
+
+/// The mode a series opens in when you haven't picked one for it, from its
+/// type ("Manga", "manhwa", …; case doesn't matter): manga reads right to
+/// left, manhwa / manhua / webtoons as a long strip, everything else
+/// (comics, unknown) left to right.
+ReadingMode defaultReadingMode(String? type) =>
+    switch (type?.trim().toLowerCase()) {
+      'manga' => ReadingMode.pagedRtl,
+      'manhwa' || 'manhua' || 'webtoon' => ReadingMode.longStrip,
+      _ => ReadingMode.pagedLtr,
+    };
+
 /// One chapter on a reading source.
 class ChapterInfo {
   const ChapterInfo({

@@ -1,11 +1,19 @@
 import 'package:material_ui/material_ui.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/entry.dart';
+import '../services/cover_cache.dart';
+import '../state/providers.dart';
 import '../theme.dart';
 
 /// Cover art with a tasteful placeholder (title initial on a tinted card)
 /// while loading, when missing, or when the image fails.
-class CoverImage extends StatelessWidget {
+///
+/// Covers are saved on the phone ([CoverCache]) the first time they load
+/// and always shown from there afterwards, so they work offline. The
+/// placeholder only stays when a cover was never saved and there's no
+/// connection; it tries again when the connection comes back.
+class CoverImage extends ConsumerWidget {
   const CoverImage({
     super.key,
     required this.url,
@@ -22,30 +30,48 @@ class CoverImage extends StatelessWidget {
   final double radius;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final placeholder = _Placeholder(title: title);
-    final u = url;
+    final u = url?.trim();
+    // A cover that failed while offline loads again once you're back.
+    final online = ref.watch(onlineProvider);
+    final Widget child;
+    if (u == null || u.isEmpty) {
+      child = placeholder;
+    } else {
+      Widget frame(BuildContext context, Widget child, int? frame, bool sync) {
+        if (sync) return child;
+        return AnimatedSwitcher(
+          duration: const Duration(milliseconds: 250),
+          child: frame == null ? placeholder : child,
+        );
+      }
+
+      final saved = CoverCache.savedSync(u);
+      final ImageProvider remote =
+          CoverCache.supported ? CachedCoverProvider(u) : NetworkImage(u);
+      child = saved != null
+          // Saved: straight from the phone, no network involved.
+          ? Image.file(
+              saved,
+              key: ValueKey('file:$u'),
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              errorBuilder: (_, _, _) => placeholder,
+              frameBuilder: frame,
+            )
+          : Image(
+              key: ValueKey('net:$u#$online'),
+              image: remote,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              errorBuilder: (_, _, _) => placeholder,
+              frameBuilder: frame,
+            );
+    }
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
-      child: SizedBox(
-        width: width,
-        height: height,
-        child: (u == null || u.isEmpty)
-            ? placeholder
-            : Image.network(
-                u,
-                fit: BoxFit.cover,
-                gaplessPlayback: true,
-                errorBuilder: (_, _, _) => placeholder,
-                frameBuilder: (context, child, frame, wasSync) {
-                  if (wasSync) return child;
-                  return AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 250),
-                    child: frame == null ? placeholder : child,
-                  );
-                },
-              ),
-      ),
+      child: SizedBox(width: width, height: height, child: child),
     );
   }
 }
@@ -276,5 +302,33 @@ void showSnack(BuildContext context, String message,
     action: action,
     backgroundColor: error ? context.colors.errorContainer : null,
     duration: Duration(seconds: action != null ? 5 : 3),
+  ));
+}
+
+DateTime _lastOfflineToast = DateTime.fromMillisecondsSinceEpoch(0);
+
+/// A short "you're offline" toast at the bottom: goes away by itself after
+/// a few seconds (or with its close button). Shown at most every 2 minutes
+/// unless [force] (you just tried something that needs a connection).
+void showOfflineToast(BuildContext context, {bool force = false}) {
+  final now = DateTime.now();
+  if (!force &&
+      now.difference(_lastOfflineToast) < const Duration(minutes: 2)) {
+    return;
+  }
+  _lastOfflineToast = now;
+  final c = context.colors;
+  final messenger = ScaffoldMessenger.of(context);
+  messenger.hideCurrentSnackBar();
+  // No action button: snack bars with one may stay until tapped.
+  messenger.showSnackBar(SnackBar(
+    behavior: SnackBarBehavior.floating,
+    showCloseIcon: true,
+    duration: const Duration(seconds: 4),
+    content: Row(children: [
+      Icon(Icons.cloud_off_rounded, size: 18, color: c.onInverseSurface),
+      const SizedBox(width: 10),
+      const Expanded(child: Text("You're offline — showing cached content")),
+    ]),
   ));
 }

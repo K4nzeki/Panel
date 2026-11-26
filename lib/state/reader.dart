@@ -224,6 +224,64 @@ final readingLinksProvider =
         ReadingLinksNotifier.new);
 
 // ---------------------------------------------------------------------------
+// Reading mode (paged right-to-left / left-to-right, long strip)
+// ---------------------------------------------------------------------------
+
+/// Reading modes you picked by hand, per title. Kept apart from the reading
+/// link so the choice survives switching or unlinking the source.
+class ReadingModesNotifier extends Notifier<Map<String, ReadingMode>> {
+  static const _key = 'reading_modes_v1';
+
+  @override
+  Map<String, ReadingMode> build() {
+    final raw = ref.read(sharedPrefsProvider).getString(_key);
+    if (raw == null) return const {};
+    try {
+      final j = jsonDecode(raw);
+      if (j is! Map) return const {};
+      return {
+        for (final e in j.entries)
+          if (ReadingMode.fromKey(e.value) case final m?) '${e.key}': m,
+      };
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  /// [mode] = null goes back to the default for the title's type.
+  void set(String entryId, ReadingMode? mode) {
+    if (state[entryId] == mode) return;
+    final next = {...state};
+    if (mode == null) {
+      next.remove(entryId);
+    } else {
+      next[entryId] = mode;
+    }
+    state = next;
+    unawaited(ref.read(sharedPrefsProvider).setString(_key,
+        jsonEncode({for (final e in next.entries) e.key: e.value.key})));
+  }
+}
+
+final readingModesProvider =
+    NotifierProvider<ReadingModesNotifier, Map<String, ReadingMode>>(
+        ReadingModesNotifier.new);
+
+/// The mode a title reads in: the one you picked for it, otherwise the
+/// default for its type ([defaultReadingMode]).
+final readingModeProvider =
+    Provider.family<ReadingMode, String>((ref, entryId) {
+  final picked = ref.watch(readingModesProvider.select((m) => m[entryId]));
+  if (picked != null) return picked;
+  final type = ref.watch(entriesProvider.select((s) => (s.value ?? const [])
+      .where((e) => e.id == entryId)
+      .firstOrNull
+      ?.type
+      .label));
+  return defaultReadingMode(type);
+});
+
+// ---------------------------------------------------------------------------
 // Chapter lists (offline first)
 // ---------------------------------------------------------------------------
 

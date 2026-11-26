@@ -39,7 +39,6 @@ class _ListScreenState extends ConsumerState<ListScreen> {
     final query = ref.watch(listQueryProvider(widget.tab));
     final visible = ref.watch(visibleEntriesProvider(widget.tab));
     final counts = ref.watch(statusCountsProvider);
-    final online = ref.watch(onlineProvider);
 
     final totalInTab = _isLibrary
         ? counts.entries
@@ -56,15 +55,20 @@ class _ListScreenState extends ConsumerState<ListScreen> {
         label: const Text('Add title'),
       ),
       body: RefreshIndicator(
-        onRefresh: () =>
-            ref.read(entriesProvider.notifier).refresh(manual: true),
+        onRefresh: () async {
+          await ref.read(entriesProvider.notifier).refresh(manual: true);
+          // Pulled to refresh with no connection: say why nothing changed.
+          if (mounted && !ref.read(onlineProvider)) {
+            showOfflineToast(context, force: true);
+          }
+        },
         child: CustomScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
             _Header(tab: widget.tab, query: query, total: totalInTab),
             // Checking chapters, finding covers and downloads show as quiet
-            // notifications instead of banners; only "offline" shows here.
-            if (!online) const SliverToBoxAdapter(child: _OfflineBanner()),
+            // notifications; being offline is a small icon in the header
+            // plus a short toast when the connection drops.
             if (_isLibrary && totalInTab > 0)
               const SliverToBoxAdapter(child: _SummaryStrip()),
             if (totalInTab > 0) ...[
@@ -266,6 +270,7 @@ class _Header extends ConsumerWidget {
     final c = context.colors;
     final isLibrary = tab == ListTab.library;
     final controller = ref.read(listQueryProvider(tab).notifier);
+    final online = ref.watch(onlineProvider);
 
     return SliverAppBar(
       floating: true,
@@ -288,6 +293,19 @@ class _Header extends ConsumerWidget {
         ],
       ),
       actions: [
+        if (!online)
+          IconButton(
+            tooltip: "Offline — tap to try again",
+            visualDensity: VisualDensity.compact,
+            onPressed: () async {
+              await ref.read(entriesProvider.notifier).refresh();
+              if (context.mounted && !ref.read(onlineProvider)) {
+                showOfflineToast(context, force: true);
+              }
+            },
+            icon: Icon(Icons.cloud_off_rounded,
+                size: 20, color: c.onSurfaceVariant),
+          ),
         if (total > 0) ...[
           IconButton(
             tooltip: query.grid ? 'List view' : 'Grid view',
@@ -457,43 +475,6 @@ class _FilterBar extends ConsumerWidget {
         itemCount: chips.length,
         separatorBuilder: (_, _) => const SizedBox(width: 8),
         itemBuilder: (_, i) => chips[i],
-      ),
-    );
-  }
-}
-
-class _OfflineBanner extends ConsumerWidget {
-  const _OfflineBanner();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final c = context.colors;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Material(
-        color: c.secondaryContainer,
-        borderRadius: BorderRadius.circular(14),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
-          child: Row(children: [
-            Icon(Icons.cloud_off_rounded, color: c.onSecondaryContainer),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                "You're offline. Your library, progress and downloaded "
-                'chapters all work; new chapters and covers update when '
-                "you're back online.",
-                style: context.text.bodySmall
-                    ?.copyWith(color: c.onSecondaryContainer),
-              ),
-            ),
-            TextButton(
-              onPressed: () =>
-                  ref.read(entriesProvider.notifier).refresh(manual: true),
-              child: const Text('Retry'),
-            ),
-          ]),
-        ),
       ),
     );
   }

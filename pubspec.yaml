@@ -1,7 +1,7 @@
 name: panel
 description: Panel — track the manga, manhwa, manhua and comics you read.
 publish_to: "none"
-version: 2.0.0+10
+version: 2.1.0+11
 
 environment:
   sdk: ">=3.7.0 <4.0.0"
