@@ -4,15 +4,16 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/entry.dart';
 import '../services/anilist.dart';
 import '../services/background.dart';
-import '../services/entries_repository.dart';
 import '../services/extension_covers.dart';
+import '../services/local_store.dart';
 import '../services/mangadex.dart';
+import '../services/sources/reader_source.dart';
 import '../services/update_checker.dart';
 import '../utils/import_merge.dart';
 import 'inbox.dart';
@@ -21,8 +22,9 @@ import 'inbox.dart';
 // Core services
 // ---------------------------------------------------------------------------
 
-final supabaseProvider =
-    Provider<SupabaseClient>((ref) => Supabase.instance.client);
+/// Loaded once in main() so settings are known before the first frame.
+final sharedPrefsProvider = Provider<SharedPreferences>(
+    (ref) => throw UnimplementedError('Override in main()'));
 
 final aniListProvider = Provider<AniListService>((ref) => AniListService());
 
@@ -30,30 +32,6 @@ final mangaDexProvider = Provider<MangaDexService>((ref) => MangaDexService());
 
 /// True while a new-chapter check is running in the app.
 final updateCheckingProvider = StateProvider<bool>((ref) => false);
-
-final authStateProvider = StreamProvider<AuthState>(
-    (ref) => ref.watch(supabaseProvider).auth.onAuthStateChange);
-
-/// The signed-in user's id. Only changes on sign-in / sign-out (not on token
-/// refreshes), so everything that depends on it doesn't reload needlessly.
-final userIdProvider = Provider<String?>((ref) {
-  ref.watch(authStateProvider);
-  return ref.watch(supabaseProvider).auth.currentUser?.id;
-});
-
-final userEmailProvider = Provider<String?>((ref) {
-  ref.watch(authStateProvider);
-  return ref.watch(supabaseProvider).auth.currentUser?.email;
-});
-
-/// Set when the user opens a password-reset link from their email.
-final passwordRecoveryProvider = StateProvider<bool>((ref) => false);
-
-final repositoryProvider = Provider<EntriesRepository?>((ref) {
-  final uid = ref.watch(userIdProvider);
-  if (uid == null) return null;
-  return EntriesRepository(ref.watch(supabaseProvider), uid);
-});
 
 // ---------------------------------------------------------------------------
 // Theme
@@ -90,79 +68,46 @@ final themeModeProvider =
 // The reader's list
 // ---------------------------------------------------------------------------
 
-/// Non-null while the last sync with Supabase failed for a reason other
-/// than being offline (shown as a banner).
-final syncErrorProvider = StateProvider<String?>((ref) => null);
-
-/// False while the server can't be reached. Changes keep working locally.
+/// False after an online job (new chapters, covers, chapter lists) found no
+/// connection. Everything in the library keeps working; it's only shown so
+/// people know why new chapters / covers aren't updating.
 final onlineProvider = StateProvider<bool>((ref) => true);
-
-/// Ids of titles with changes that haven't reached the server yet.
-final pendingIdsProvider = StateProvider<Set<String>>((ref) => const {});
-
-/// How many changes are waiting to sync.
-final pendingCountProvider = StateProvider<int>((ref) => 0);
 
 /// Progress of the background "find missing covers" job, or null when idle.
 final coverFillProvider =
     StateProvider<({int done, int total})?>((ref) => null);
 
-/// Offline-first list. Every change is applied on the phone straight away,
-/// saved to a local queue (the "outbox"), and sent to Supabase whenever
-/// there's a connection — on launch, when the app comes back to the
-/// foreground, every 20 seconds while something is waiting, and on
-/// pull-to-refresh.
+/// The list, saved on the phone only (see [LocalStore]). Every change is
+/// saved straight away and works with no connection. Online extras — new
+/// chapter checks and missing covers — run when the app opens, when it
+/// comes back to the foreground, and on pull-to-refresh, and quietly wait
+/// for the next try when offline.
 class EntriesNotifier extends AsyncNotifier<List<Entry>> {
-  EntriesRepository get _repo => ref.read(repositoryProvider)!;
-
   List<Entry> get _current => state.value ?? const [];
 
-  List<Map<String, dynamic>> _outbox = [];
-  bool _syncing = false;
-  bool _syncAgain = false;
-  Map<String, dynamic>? _inFlight; // op currently being sent
-  Timer? _timer;
   AppLifecycleListener? _lifecycle;
 
   @override
   Future<List<Entry>> build() async {
-    final repo = ref.watch(repositoryProvider);
-    _timer?.cancel();
     _lifecycle?.dispose();
-    ref.onDispose(() {
-      _timer?.cancel();
-      _lifecycle?.dispose();
-    });
-    if (repo == null) {
-      _outbox = [];
-      return const [];
-    }
-
-    _outbox = await repo.readOutbox();
-    _publishPending();
-    _timer = Timer.periodic(const Duration(seconds: 20), (_) {
-      if (_outbox.isNotEmpty) unawaited(sync());
-    });
     _lifecycle = AppLifecycleListener(onResume: () => unawaited(refresh()));
+    ref.onDispose(() => _lifecycle?.dispose());
 
-    final cached = await repo.readCache();
-    if (cached != null) {
-      // Show the saved list instantly (works offline), then sync.
-      Future.microtask(refresh);
-      return cached;
-    }
-    final fresh = await repo.fetchAll();
-    unawaited(repo.writeCache(fresh));
-    _setOnline(true);
-    return fresh;
+    // Fold in what the background job found while the app was closed.
+    // (Patches hold absolute values, so applying one twice is harmless.)
+    final saved = LocalStore.applyPatches(await LocalStore.readEntries(),
+        await LocalStore.takeBackgroundPatches());
+    unawaited(LocalStore.writeEntries(saved));
+    // After the list is on screen: covers and the new-chapter check.
+    unawaited(Future<void>.delayed(Duration.zero, refresh));
+    return saved;
   }
 
   // ---- local state ----
 
   void _set(List<Entry> list) {
     state = AsyncData(list);
-    final repo = ref.read(repositoryProvider);
-    if (repo != null) unawaited(repo.writeCache(list));
+    unawaited(LocalStore.writeEntries(list));
   }
 
   void _setOnline(bool v) {
@@ -171,169 +116,51 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     }
   }
 
-  void _publishPending() {
-    final ids = <String>{
-      for (final op in _outbox)
-        if (op['id'] != null) op['id'] as String,
-    };
-    ref.read(pendingIdsProvider.notifier).state = ids;
-    ref.read(pendingCountProvider.notifier).state = _outbox.length;
+  /// Applies a column patch (e.g. from the update check) to one title.
+  Future<void> _patch(String id, Map<String, dynamic> patch) async {
+    if (patch.isEmpty) return;
+    _set([
+      for (final e in _current)
+        e.id == id ? LocalStore.applyPatch(e, patch) : e,
+    ]);
   }
 
-  Future<void> _persistOutbox() async {
-    _publishPending();
-    final repo = ref.read(repositoryProvider);
-    if (repo != null) await repo.writeOutbox(_outbox);
+  static bool isConnectionProblem(Object e) {
+    final s = e.toString();
+    return e is UpdateOffline ||
+        s.contains('SocketException') ||
+        s.contains('ClientException') ||
+        s.contains('Failed host lookup') ||
+        s.contains('TimeoutException') ||
+        s.contains('HandshakeException');
   }
 
-  /// Adds an operation to the queue, merging with earlier ones where it can
-  /// (e.g. edits to a title that hasn't been uploaded yet just change the
-  /// pending upload).
-  void _enqueue(Map<String, dynamic> op) {
-    final id = op['id'] as String?;
-    switch (op['op']) {
-      case 'update':
-        final i = _outbox.lastIndexWhere(
-            (o) => o['id'] == id && (o['op'] == 'upsert' || o['op'] == 'update'));
-        // Only merge into the latest op for this id if nothing else for it
-        // (like a log row) was queued after it.
-        // (Never touch the op that is being uploaded right now.)
-        if (i >= 0 &&
-            !identical(_outbox[i], _inFlight) &&
-            !_outbox.skip(i + 1).any((o) => o['id'] == id)) {
-          final target = _outbox[i];
-          final key = target['op'] == 'upsert' ? 'row' : 'patch';
-          target[key] = {
-            ...(target[key] as Map).cast<String, dynamic>(),
-            ...(op['patch'] as Map).cast<String, dynamic>(),
-          };
-          return;
-        }
-      case 'delete':
-        final uploading = _inFlight != null && _inFlight!['id'] == id;
-        final neverUploaded = _outbox.any((o) =>
-            o['id'] == id && o['op'] == 'upsert' && !identical(o, _inFlight));
-        _outbox.removeWhere((o) =>
-            o['id'] == id && o['op'] != 'delete' && !identical(o, _inFlight));
-        // Never reached the server: nothing to delete there.
-        if (neverUploaded && !uploading) return;
-    }
-    _outbox.add(op);
-  }
-
-  Future<void> _queue(List<Map<String, dynamic>> ops) async {
-    for (final op in ops) {
-      _enqueue(op);
-    }
-    await _persistOutbox();
-    unawaited(sync());
-  }
-
-  // ---- syncing ----
-
-  static bool _isConnectionProblem(Object e) {
-    if (e is PostgrestException) {
-      // Expired / missing login token: wait for the session to refresh.
-      return e.code == 'PGRST301' ||
-          e.code == 'PGRST303' ||
-          e.message.toLowerCase().contains('jwt');
-    }
-    return true; // socket errors, timeouts, auth refresh failures, etc.
-  }
-
-  /// Sends queued changes to Supabase. Stops (and keeps the rest) at the
-  /// first connection problem; a change the server rejects is dropped so it
-  /// can't block everything behind it.
-  Future<void> sync() async {
-    if (_syncing) {
-      _syncAgain = true;
-      return;
-    }
-    final repo = ref.read(repositoryProvider);
-    if (repo == null || _outbox.isEmpty) return;
-    _syncing = true;
-    // Most syncs take a moment; only show a notification for slow ones.
-    final slow = Timer(const Duration(seconds: 2), () {
-      final n = _outbox.length;
-      if (_syncing && n > 0) {
-        unawaited(Notifications.showProgress(Notifications.syncProgressId,
-            'Syncing $n ${n == 1 ? 'change' : 'changes'}'));
-      }
-    });
-    try {
-      while (_outbox.isNotEmpty) {
-        final op = _outbox.first;
-        _inFlight = op;
-        try {
-          switch (op['op']) {
-            case 'upsert':
-              await repo.upsertRow((op['row'] as Map).cast<String, dynamic>());
-            case 'update':
-              await repo.patchRow(
-                  op['id'] as String, (op['patch'] as Map).cast<String, dynamic>());
-            case 'delete':
-              await repo.deleteRow(op['id'] as String);
-            case 'log':
-              await repo.insertLog(
-                  op['table'] as String, (op['row'] as Map).cast<String, dynamic>());
-          }
-        } catch (e) {
-          if (_isConnectionProblem(e)) {
-            _inFlight = null;
-            _setOnline(false);
-            return;
-          }
-          // Log rows only feed the charts; never surface those failures.
-          if (op['op'] != 'log') {
-            ref.read(syncErrorProvider.notifier).state =
-                "A change couldn't be saved: ${friendlyError(e)}";
-          }
-        }
-        _inFlight = null;
-        _outbox.remove(op);
-        await _persistOutbox();
-        _setOnline(true);
-      }
-    } finally {
-      _syncing = false;
-      slow.cancel();
-      unawaited(Notifications.endProgress(Notifications.syncProgressId));
-      if (_syncAgain) {
-        _syncAgain = false;
-        unawaited(sync());
-      }
-    }
-  }
-
-  /// Pushes pending changes, pulls the latest list from the server, then
-  /// looks up covers for any titles that don't have one yet and checks for
-  /// new chapters. Both run in the background after the list is shown;
-  /// [manual] (pull-to-refresh) checks chapters now instead of every 5 hours.
+  /// Picks up the background job's findings, then looks up covers for any
+  /// titles that don't have one yet and checks for new chapters. Both run
+  /// in the background after the list is shown; [manual] (pull-to-refresh)
+  /// checks chapters now instead of every 5 hours.
   Future<void> refresh({bool manual = false}) async {
-    final repo = ref.read(repositoryProvider);
-    if (repo == null) return;
-    await sync();
-    // Don't overwrite local changes that haven't been uploaded yet.
-    if (_outbox.isEmpty) {
-      try {
-        final fresh = await repo.fetchAll();
-        if (_outbox.isEmpty) {
-          _set(fresh);
-          _setOnline(true);
-        }
-      } catch (e) {
-        if (_isConnectionProblem(e)) {
-          _setOnline(false);
-        } else {
-          ref.read(syncErrorProvider.notifier).state = friendlyError(e);
-        }
-        if (!state.hasValue) state = AsyncError(e, StackTrace.current);
-      }
+    if (!state.hasValue) return;
+    final patches = await LocalStore.takeBackgroundPatches();
+    if (patches.isNotEmpty) _set(LocalStore.applyPatches(_current, patches));
+    if (!ref.read(onlineProvider)) await _probe();
+    unawaited(fillMissingCovers());
+    if (manual) {
+      await checkUpdates(force: true);
+    } else {
+      unawaited(checkUpdates());
     }
-    if (ref.read(onlineProvider)) {
-      unawaited(fillMissingCovers());
-      unawaited(checkUpdates(force: manual));
-    }
+  }
+
+  /// After being offline: a tiny request to see if the connection is back
+  /// (clears the "You're offline" banner even when nothing else is due).
+  Future<void> _probe() async {
+    try {
+      final res = await http
+          .get(Uri.https('api.mangadex.org', '/ping'))
+          .timeout(const Duration(seconds: 8));
+      if (res.statusCode < 500) _setOnline(true);
+    } catch (_) {}
   }
 
   // ---- new chapters ----
@@ -344,53 +171,31 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
   /// unless [force] is set. The background job does the same while the app
   /// is closed; whichever runs first resets the 5-hour clock.
   Future<void> checkUpdates({bool force = false}) async {
-    final uid = ref.read(userIdProvider);
-    if (uid == null || _checking) return;
-    final checker = UpdateChecker(ref.read(supabaseProvider), uid,
-        source: ref.read(mangaDexProvider));
+    if (_checking) return;
+    final checker = UpdateChecker(source: ref.read(mangaDexProvider));
     if (!force && !await checker.isDue()) return;
     _checking = true;
     ref.read(updateCheckingProvider.notifier).state = true;
     try {
       // Progress shows as a quiet notification, not a banner in the list.
       final updates = await checker.run(
+        _current,
+        _patch,
         onProgress: (done, total) => Notifications.showProgress(
             Notifications.chaptersProgressId, 'Checking for new chapters',
             done: done, total: total),
       );
-      await Notifications.showUpdates(uid, updates);
+      _setOnline(true);
+      await Notifications.showUpdates(updates);
       if (updates.isNotEmpty) await ref.read(inboxProvider.notifier).reload();
-      await _pullSourceFields();
-    } catch (_) {
-      // Offline or the server refused — the next check will try again.
+    } catch (e) {
+      // Offline — the next check will try again.
+      if (isConnectionProblem(e)) _setOnline(false);
     } finally {
       _checking = false;
       ref.read(updateCheckingProvider.notifier).state = false;
       await Notifications.endProgress(Notifications.chaptersProgressId);
     }
-  }
-
-  /// Copies what the update check saved on the server (links, newest
-  /// chapter, covers it filled in) into the local list, without touching
-  /// edits that haven't synced yet.
-  Future<void> _pullSourceFields() async {
-    final repo = ref.read(repositoryProvider);
-    if (repo == null) return;
-    final fresh = {for (final e in await repo.fetchAll()) e.id: e};
-    _set([
-      for (final e in _current)
-        if (fresh[e.id] case final f?)
-          e.copyWith(
-            sourceId: Nullable(f.sourceId),
-            latestChapter: Nullable(f.latestChapter),
-            latestCheckedAt: Nullable(f.latestCheckedAt),
-            coverUrl: (e.coverUrl == null || e.coverUrl!.trim().isEmpty)
-                ? Nullable(f.coverUrl)
-                : null,
-          )
-        else
-          e,
-    ]);
   }
 
   /// Links [e] to a series picked by hand. Uses its cover (the accurate one
@@ -401,12 +206,6 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
       latest = await ref.read(mangaDexProvider).latestChapter(m.id);
     } catch (_) {}
     final now = DateTime.now();
-    final patch = <String, dynamic>{
-      'source_id': m.sourceId,
-      'latest_chapter': latest,
-      'latest_checked_at': now.toUtc().toIso8601String(),
-      if (!keepCover && m.coverUrl != null) 'cover_url': m.coverUrl,
-    };
     await save(
       e,
       e.copyWith(
@@ -415,7 +214,12 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
         latestCheckedAt: Nullable(now),
         coverUrl: (!keepCover && m.coverUrl != null) ? Nullable(m.coverUrl) : null,
       ),
-      patch,
+      {
+        'source_id': m.sourceId,
+        'latest_chapter': latest,
+        'latest_checked_at': now.toUtc().toIso8601String(),
+        if (!keepCover && m.coverUrl != null) 'cover_url': m.coverUrl,
+      },
     );
   }
 
@@ -445,7 +249,16 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     );
   }
 
-  void clearSyncError() => ref.read(syncErrorProvider.notifier).state = null;
+  /// The reading source's chapter list just loaded: if it has more chapters
+  /// than we knew about, show them as new (no notification).
+  Future<void> noteLatestFromReader(String entryId, int latest) async {
+    final e = _current.where((x) => x.id == entryId).firstOrNull;
+    if (e == null || (e.latestChapter ?? -1) >= latest) return;
+    await _patch(e.id, {
+      'latest_chapter': latest,
+      'latest_checked_at': DateTime.now().toUtc().toIso8601String(),
+    });
+  }
 
   // ---- changes ----
 
@@ -454,21 +267,6 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     if (list.isEmpty) return 0;
     return list.map((e) => e.position).reduce((a, b) => a < b ? a : b) - 1;
   }
-
-  Map<String, dynamic> _rowFor(Entry e) => {
-        'id': e.id,
-        'title': e.title,
-        'type': e.type.label,
-        'status': e.status.label,
-        'chapter': e.chapter,
-        'reread': e.reread,
-        'position': e.position,
-        'cover_url': e.coverUrl,
-        'author': e.author,
-        'total_chapters': e.totalChapters,
-        'read_on_url': e.readOnUrl,
-        'created_at': e.createdAt?.toUtc().toIso8601String(),
-      };
 
   Future<Entry> add({
     required String title,
@@ -494,9 +292,6 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
       readOnUrl: readOnUrl,
     );
     _set([entry, ..._current]);
-    await _queue([
-      {'op': 'upsert', 'id': entry.id, 'row': _rowFor(entry)}
-    ]);
     return entry;
   }
 
@@ -509,16 +304,14 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     return null;
   }
 
-  /// Applies [optimistic] locally right away and queues [patch] for upload.
+  /// Applies [optimistic] and saves it. [patch] lists the columns that
+  /// changed (used for the Stats logs and to stamp "last read").
   Future<void> save(Entry before, Entry optimistic,
       Map<String, dynamic> patch) async {
     if (patch.isEmpty) return;
-    final full = {...patch};
     var after = optimistic;
     if (patch.containsKey('chapter')) {
-      final now = DateTime.now();
-      full['last_read_at'] = now.toUtc().toIso8601String();
-      after = after.copyWith(lastReadAt: now);
+      after = after.copyWith(lastReadAt: DateTime.now());
     }
     _set([
       for (final e in _current) e.id == before.id ? after : e,
@@ -527,27 +320,42 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
         after.status == EntryStatus.finished) {
       unawaited(HapticFeedback.mediumImpact());
     }
-    await _queue([
-      {'op': 'update', 'id': before.id, 'patch': full},
-      for (final log in _repo.activityRows(before, after, patch))
-        {'op': 'log', 'id': before.id, 'table': log.table, 'row': log.row},
-    ]);
+    await LocalStore.recordActivity(before, after, patch);
   }
 
   Future<void> bumpChapter(Entry e, int by) async {
     final raw = e.chapter + by;
-    final next = raw < 0 ? 0 : raw;
+    await setChapter(e, raw < 0 ? 0 : raw, haptic: true);
+  }
+
+  /// Sets the chapter you're on. Reading anything of a To Read title moves
+  /// it into the library automatically.
+  Future<void> setChapter(Entry e, int next, {bool haptic = false}) async {
     if (next == e.chapter) return;
-    unawaited(HapticFeedback.selectionClick());
+    if (haptic) unawaited(HapticFeedback.selectionClick());
     final patch = <String, dynamic>{'chapter': next};
     var optimistic = e.copyWith(chapter: next, lastReadAt: DateTime.now());
-    // Reading the first chapter of something on the To Read pile moves it
-    // into the library automatically.
-    if (by > 0 && e.status == EntryStatus.toRead) {
+    if (next > e.chapter && e.status == EntryStatus.toRead) {
       patch['status'] = EntryStatus.reading.label;
       optimistic = optimistic.copyWith(status: EntryStatus.reading);
     }
     await save(e, optimistic, patch);
+  }
+
+  /// Called by the reader: you finished chapter [number] of [entryId].
+  /// Only ever moves progress forward.
+  Future<void> markReadUpTo(String entryId, int number) async {
+    final e = _current.where((x) => x.id == entryId).firstOrNull;
+    if (e == null || number <= e.chapter) return;
+    await setChapter(e, number);
+  }
+
+  /// Just stamps "last read" (opening the reader counts as activity).
+  void touch(String entryId) {
+    _set([
+      for (final e in _current)
+        e.id == entryId ? e.copyWith(lastReadAt: DateTime.now()) : e,
+    ]);
   }
 
   Future<void> setStatus(Entry e, EntryStatus status) async {
@@ -567,49 +375,16 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
   Future<Entry> remove(Entry e) async {
     _set(_current.where((x) => x.id != e.id).toList());
     unawaited(HapticFeedback.lightImpact());
-    await _queue([
-      {'op': 'delete', 'id': e.id}
-    ]);
     return e;
   }
 
-  /// Puts a deleted entry back (gets a new id; keeps everything else).
+  /// Puts a deleted entry back exactly as it was (same id, so its reading
+  /// source, progress and downloads still match).
   Future<void> restore(Entry e) async {
-    final restored = Entry(
-      id: newUuid(),
-      title: e.title,
-      type: e.type,
-      status: e.status,
-      chapter: e.chapter,
-      reread: e.reread,
-      position: e.position,
-      createdAt: e.createdAt ?? DateTime.now(),
-      coverUrl: e.coverUrl,
-      author: e.author,
-      totalChapters: e.totalChapters,
-      readOnUrl: e.readOnUrl,
-      lastReadAt: e.lastReadAt,
-      sourceId: e.sourceId,
-      latestChapter: e.latestChapter,
-      latestCheckedAt: e.latestCheckedAt,
-    );
-    final list = [..._current, restored]
+    if (_current.any((x) => x.id == e.id)) return;
+    final list = [..._current, e]
       ..sort((a, b) => a.position.compareTo(b.position));
     _set(list);
-    await _queue([
-      {
-        'op': 'upsert',
-        'id': restored.id,
-        'row': {
-          ..._rowFor(restored),
-          'last_read_at': restored.lastReadAt?.toUtc().toIso8601String(),
-          'source_id': restored.sourceId,
-          'latest_chapter': restored.latestChapter,
-          'latest_checked_at':
-              restored.latestCheckedAt?.toUtc().toIso8601String(),
-        }
-      }
-    ]);
   }
 
   /// Moves [moved] to sit where [target] is, in the custom ("My order") sort.
@@ -623,20 +398,16 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     final moved = ordered.removeAt(from);
     ordered.insert(to, moved);
 
-    final changed = <String, int>{};
+    var changed = false;
     final next = <Entry>[];
     for (var i = 0; i < ordered.length; i++) {
       final e = ordered[i];
-      if (e.position != i) changed[e.id] = i;
+      if (e.position != i) changed = true;
       next.add(e.position == i ? e : e.copyWith(position: i));
     }
-    if (changed.isEmpty) return;
+    if (!changed) return;
     unawaited(HapticFeedback.selectionClick());
     _set(next);
-    await _queue([
-      for (final c in changed.entries)
-        {'op': 'update', 'id': c.key, 'patch': {'position': c.value}},
-    ]);
   }
 
   /// Bulk import from a pasted list or an Excel / CSV file. Uses an
@@ -665,40 +436,26 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
         ),
     ].reversed.toList();
 
-    final updates = <String, ({Entry after, Map<String, dynamic> patch})>{};
+    final updates = <String, Entry>{};
     for (final u in plan.toUpdate) {
       final e = u.existing;
       final p = u.incoming;
       final reread = p.reread > e.reread ? p.reread : e.reread;
-      final patch = <String, dynamic>{
-        'chapter': p.chapter,
-        'last_read_at': now.toUtc().toIso8601String(),
-        if (p.status != e.status) 'status': p.status.label,
-        if (reread != e.reread) 'reread': reread,
-      };
-      updates[e.id] = (
-        after: e.copyWith(
-          chapter: p.chapter,
-          status: p.status,
-          reread: reread,
-          lastReadAt: now,
-        ),
-        patch: patch,
+      updates[e.id] = e.copyWith(
+        chapter: p.chapter,
+        status: p.status,
+        reread: reread,
+        lastReadAt: now,
       );
     }
 
     final list = [
       ...added,
-      for (final e in _current) updates[e.id]?.after ?? e,
+      for (final e in _current) updates[e.id] ?? e,
     ]..sort((a, b) => a.position.compareTo(b.position));
+    // No Stats logs here: catching up an old list shouldn't show up as
+    // hundreds of chapters "read today".
     _set(list);
-    // No chapter / completion log rows here: catching up an old list
-    // shouldn't show up as hundreds of chapters "read today" in Stats.
-    await _queue([
-      for (final e in added) {'op': 'upsert', 'id': e.id, 'row': _rowFor(e)},
-      for (final u in updates.entries)
-        {'op': 'update', 'id': u.key, 'patch': u.value.patch},
-    ]);
     unawaited(fillMissingCovers());
     return (added: added.length, updated: updates.length);
   }
@@ -760,7 +517,6 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     try {
       var busyRetries = 0;
       for (var i = 0; i < todo.length; i++) {
-        if (ref.read(repositoryProvider) == null) return; // signed out
         // Re-read: the title may have been edited or deleted meanwhile.
         final e = _current.where((x) => x.id == todo[i]).firstOrNull;
         if (e != null && needsCover(e)) {
@@ -778,9 +534,11 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
                 continue;
               }
               return; // AniList keeps refusing — try again next refresh
-            } catch (_) {
+            } catch (err) {
+              if (isConnectionProblem(err)) _setOnline(false);
               return; // offline — try again next refresh
             }
+            _setOnline(true);
             cover = match?.coverUrl;
             if (cover == null || cover.isEmpty) {
               // Not on AniList (or no cover there): try MangaDex.
@@ -799,20 +557,15 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
           if (cover == null || cover.isEmpty) {
             _noCoverFound.add(titleKey(e.title));
           } else if (now != null && needsCover(now)) {
-            final patch = <String, dynamic>{'cover_url': cover};
             var after = now.copyWith(coverUrl: Nullable(cover));
             if (now.author == null && match?.author != null) {
-              patch['author'] = match!.author;
-              after = after.copyWith(author: Nullable(match.author));
+              after = after.copyWith(author: Nullable(match!.author));
             }
             if (now.totalChapters == null && match?.totalChapters != null) {
-              patch['total_chapters'] = match!.totalChapters;
-              after = after.copyWith(totalChapters: Nullable(match.totalChapters));
+              after =
+                  after.copyWith(totalChapters: Nullable(match!.totalChapters));
             }
             _set([for (final x in _current) x.id == now.id ? after : x]);
-            await _queue([
-              {'op': 'update', 'id': now.id, 'patch': patch}
-            ]);
           }
           // Stay well under AniList's rate limit.
           await Future<void>.delayed(const Duration(milliseconds: 700));
@@ -946,45 +699,12 @@ final statusCountsProvider = Provider<Map<EntryStatus, int>>((ref) {
 // ---------------------------------------------------------------------------
 
 final chaptersPerDayProvider =
-    FutureProvider<List<({DateTime day, int chapters})>>((ref) async {
-  final repo = ref.watch(repositoryProvider);
-  if (repo == null) return const [];
-  return repo.chaptersPerDay(days: 14);
-});
+    FutureProvider<List<({DateTime day, int chapters})>>(
+        (ref) => LocalStore.chaptersPerDay(days: 14));
 
 final completionsPerMonthProvider =
-    FutureProvider<List<({DateTime month, int count})>>((ref) async {
-  final repo = ref.watch(repositoryProvider);
-  if (repo == null) return const [];
-  return repo.completionsPerMonth(months: 6);
-});
-
-// ---------------------------------------------------------------------------
-// Profile
-// ---------------------------------------------------------------------------
-
-@immutable
-class Profile {
-  const Profile({this.username, this.listVisible = true});
-  final String? username;
-  final bool listVisible;
-}
-
-final profileProvider = FutureProvider<Profile>((ref) async {
-  final uid = ref.watch(userIdProvider);
-  if (uid == null) return const Profile();
-  final row = await ref
-      .watch(supabaseProvider)
-      .from('profiles')
-      .select('username, list_visible')
-      .eq('id', uid)
-      .maybeSingle();
-  if (row == null) return const Profile();
-  return Profile(
-    username: row['username'] as String?,
-    listVisible: (row['list_visible'] as bool?) ?? true,
-  );
-});
+    FutureProvider<List<({DateTime month, int count})>>(
+        (ref) => LocalStore.completionsPerMonth(months: 6));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -992,17 +712,11 @@ final profileProvider = FutureProvider<Profile>((ref) async {
 
 /// Turns exceptions into a sentence fit for a snackbar.
 String friendlyError(Object e) {
-  if (e is AuthException) return e.message;
-  if (e is PostgrestException) return e.message;
-  if (e is DataException) return e.message;
   if (e is AniListException) return e.message;
   if (e is MangaDexException) return e.message;
-  final s = e.toString();
-  if (s.contains('SocketException') ||
-      s.contains('ClientException') ||
-      s.contains('Failed host lookup') ||
-      s.contains('TimeoutException')) {
-    return "You're offline. Your changes are saved on this phone and will sync when you're back online.";
+  if (e is SourceException) return e.message;
+  if (EntriesNotifier.isConnectionProblem(e)) {
+    return "You're offline. Your library still works; this needs a connection.";
   }
-  return s.replaceFirst('Exception: ', '');
+  return e.toString().replaceFirst('Exception: ', '');
 }

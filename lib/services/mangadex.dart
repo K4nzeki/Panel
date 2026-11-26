@@ -32,6 +32,25 @@ class SourceManga {
   }
 }
 
+/// One chapter in a MangaDex feed.
+class MangaDexChapter {
+  const MangaDexChapter({
+    required this.id,
+    this.chapter,
+    this.title,
+    this.volume,
+    this.group,
+    this.publishedAt,
+  });
+
+  final String id;
+  final String? chapter; // "12", "12.5", or null for oneshots
+  final String? title;
+  final String? volume;
+  final String? group;
+  final DateTime? publishedAt;
+}
+
 /// Lowercase letters and digits only, so "Solo Leveling!" == "solo leveling".
 String normalizeTitle(String s) =>
     s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9À-￿]+'), '');
@@ -97,6 +116,70 @@ class MangaDexService {
     return parseLatest(json);
   }
 
+  /// Every readable chapter of [mangaId] in [language], newest first, with
+  /// the scanlation group names. Chapters hosted elsewhere (official
+  /// publisher links) are left out since they can't be read here.
+  Future<List<MangaDexChapter>> chapterFeed(String mangaId,
+      {String lang = language}) async {
+    const limit = 500;
+    final out = <MangaDexChapter>[];
+    for (var offset = 0; offset < 10000; offset += limit) {
+      final json = await _get('/manga/$mangaId/feed', {
+        'translatedLanguage[]': [lang],
+        'order[chapter]': 'desc',
+        'includes[]': ['scanlation_group'],
+        'contentRating[]': _ratings,
+        'includeExternalUrl': '0',
+        'includeEmptyPages': '0',
+        'limit': '$limit',
+        'offset': '$offset',
+      });
+      out.addAll(parseFeed(json));
+      final total = (json['total'] as num?)?.toInt() ?? 0;
+      if (offset + limit >= total) break;
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+    }
+    return out;
+  }
+
+  @visibleForTesting
+  static List<MangaDexChapter> parseFeed(Map<String, dynamic> json) {
+    final out = <MangaDexChapter>[];
+    for (final d in (json['data'] as List?) ?? const []) {
+      if (d is! Map) continue;
+      final a = (d['attributes'] as Map?) ?? const {};
+      if (a['externalUrl'] != null) continue;
+      final groups = <String>[
+        for (final r in (d['relationships'] as List?) ?? const [])
+          if (r is Map && r['type'] == 'scanlation_group')
+            if ((r['attributes'] as Map?)?['name'] case final String n) n,
+      ];
+      out.add(MangaDexChapter(
+        id: '${d['id']}',
+        chapter: a['chapter'] as String?,
+        title: a['title'] as String?,
+        volume: a['volume'] as String?,
+        group: groups.isEmpty ? null : groups.join(' & '),
+        publishedAt: DateTime.tryParse('${a['publishAt'] ?? a['readableAt'] ?? ''}'),
+      ));
+    }
+    return out;
+  }
+
+  /// Image URLs of one chapter, in order. MangaDex hands out a fresh image
+  /// server each time; the links work for about 15 minutes.
+  Future<List<String>> chapterPages(String chapterId) async {
+    final json = await _get('/at-home/server/$chapterId', const {});
+    final base = json['baseUrl'] as String?;
+    final ch = (json['chapter'] as Map?) ?? const {};
+    final hash = ch['hash'] as String?;
+    final files = (ch['data'] as List?)?.whereType<String>().toList() ?? const [];
+    if (base == null || hash == null || files.isEmpty) {
+      throw const MangaDexException('This chapter has no pages on MangaDex.');
+    }
+    return [for (final f in files) '$base/data/$hash/$f'];
+  }
+
   /// Highest chapter number in an `/aggregate` response, rounded down.
   @visibleForTesting
   static int? parseLatest(Map<String, dynamic> json) {
@@ -117,7 +200,7 @@ class MangaDexService {
 
   Future<Map<String, dynamic>> _get(
       String path, Map<String, dynamic> params) async {
-    final uri = Uri.https(_api, path, params);
+    final uri = Uri.https(_api, path, params.isEmpty ? null : params);
     final res = await _client.get(uri, headers: {
       'Accept': 'application/json',
       // MangaDex asks API clients to identify themselves (browsers can't).

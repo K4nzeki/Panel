@@ -21,7 +21,8 @@ import io.flutter.embedding.android.FlutterFragmentActivity;
 import io.flutter.embedding.engine.FlutterEngine;
 import io.flutter.plugin.common.MethodChannel;
 
-// FlutterFragmentActivity is required for the fingerprint / face prompt.
+// FlutterFragmentActivity (with the AppCompat theme in styles.xml) is kept
+// from the app-lock days; it works the same as FlutterActivity without it.
 public class MainActivity extends FlutterFragmentActivity {
     private static final String CHANNEL = "com.readlist.panel/updater";
 

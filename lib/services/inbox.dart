@@ -64,17 +64,17 @@ class ChapterAlert {
   }
 }
 
-/// Saved "new chapter" alerts, kept on the phone per account. Written by the
-/// in-app check and by the background job (a separate isolate), so every
-/// read reloads from storage first.
+/// Saved "new chapter" alerts, kept on the phone. Written by the in-app
+/// check and by the background job (a separate isolate), so every read
+/// reloads from storage first.
 class Inbox {
   static const max = 100;
-  static String _key(String userId) => 'inbox_v1_$userId';
+  static const _key = 'inbox_v2';
 
-  static Future<List<ChapterAlert>> load(String userId) async {
+  static Future<List<ChapterAlert>> load() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
-    final raw = prefs.getString(_key(userId));
+    final raw = prefs.getString(_key);
     if (raw == null) return [];
     try {
       final list = jsonDecode(raw);
@@ -88,17 +88,16 @@ class Inbox {
     }
   }
 
-  static Future<void> save(String userId, List<ChapterAlert> alerts) async {
+  static Future<void> save(List<ChapterAlert> alerts) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_key(userId),
+    await prefs.setString(_key,
         jsonEncode([for (final a in alerts.take(max)) a.toJson()]));
   }
 
   /// Adds alerts for [updates], newest first. A series keeps one alert: a
   /// newer chapter replaces the older alert for it.
-  static Future<List<ChapterAlert>> add(
-      String userId, List<SeriesUpdate> updates) async {
-    final current = await load(userId);
+  static Future<List<ChapterAlert>> add(List<SeriesUpdate> updates) async {
+    final current = await load();
     if (updates.isEmpty) return current;
     final now = DateTime.now();
     final fresh = [
@@ -114,7 +113,7 @@ class Inbox {
     ];
     final ids = {for (final a in fresh) a.entryId};
     final next = [...fresh, ...current.where((a) => !ids.contains(a.entryId))];
-    await save(userId, next);
+    await save(next);
     return next;
   }
 }

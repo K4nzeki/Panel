@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../services/updater.dart';
-import '../state/app_lock.dart';
+import '../state/providers.dart';
 import 'common.dart';
 
 final updaterProvider = Provider<Updater>((ref) => Updater());

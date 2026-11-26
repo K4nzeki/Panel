@@ -4,8 +4,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/entry.dart';
+import '../models/reader.dart';
+import '../screens/chapters_screen.dart';
 import '../services/mangadex.dart';
+import '../state/downloads.dart';
 import '../state/providers.dart';
+import '../state/reader.dart';
 import '../theme.dart';
 import '../utils/dates.dart';
 import 'common.dart';
@@ -118,8 +122,12 @@ class _EntrySheet extends ConsumerWidget {
           ],
         ),
 
-        // ---- Chapter stepper ----
-        const SizedBox(height: 24),
+        // ---- Read ----
+        const SizedBox(height: 20),
+        _ReadRow(entry: e),
+
+        // ---- Chapter stepper (set progress by hand) ----
+        const SizedBox(height: 16),
         Container(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
@@ -180,7 +188,6 @@ class _EntrySheet extends ConsumerWidget {
                   ),
                   _RoundIconButton(
                     icon: Icons.add_rounded,
-                    filled: true,
                     onTap: () => run(() => notifier.bumpChapter(e, 1)),
                   ),
                 ],
@@ -317,6 +324,80 @@ class _EntrySheet extends ConsumerWidget {
       ],
     );
   }
+}
+
+/// Resume (opens the reader where you stopped) and the chapter list.
+class _ReadRow extends ConsumerWidget {
+  const _ReadRow({required this.entry});
+  final Entry entry;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.colors;
+    final link = ref.watch(readingLinksProvider.select((m) => m[entry.id]));
+    final downloaded = ref.watch(downloadsProvider.select(
+        (s) => s.done.values.where((d) => d.entryId == entry.id).length));
+    final started = (link?.hasProgress ?? false) || entry.chapter > 0;
+
+    Future<void> resume() async {
+      try {
+        await resumeReading(context, ref, entry);
+      } catch (err) {
+        if (context.mounted) showSnack(context, friendlyError(err), error: true);
+      }
+    }
+
+    final where = link == null ? null : _where(link, downloaded);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(children: [
+          Expanded(
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                  minimumSize: const Size.fromHeight(52)),
+              onPressed: resume,
+              icon: const Icon(Icons.play_arrow_rounded),
+              label: Text(started ? 'Resume' : 'Start reading'),
+            ),
+          ),
+          const SizedBox(width: 10),
+          OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(minimumSize: const Size(0, 52)),
+            onPressed: () => openChapters(context, entry.id),
+            icon: const Icon(Icons.format_list_numbered_rounded),
+            label: const Text('Chapters'),
+          ),
+        ]),
+        if (where != null) ...[
+          const SizedBox(height: 6),
+          Text(where,
+              textAlign: TextAlign.center,
+              style: context.text.labelSmall?.copyWith(color: c.onSurfaceVariant)),
+        ],
+      ],
+    );
+  }
+
+  /// "Reading on MangaDex · stopped at Ch 12, page 4 · 3 downloaded".
+  static String _where(ReadingLink link, int downloaded) {
+    final n = link.lastChapterNumber;
+    final stopped = n == null
+        ? null
+        : link.lastFinished
+            ? 'finished Ch ${_num(n)}'
+            : 'stopped at Ch ${_num(n)}'
+                '${link.lastPageCount != null ? ', page ${link.lastPage + 1}' : ''}';
+    return [
+      'Reading on ${link.sourceName}',
+      if (stopped != null) stopped,
+      if (downloaded > 0) '$downloaded downloaded',
+    ].join(' · ');
+  }
+
+  static String _num(double n) =>
+      n == n.roundToDouble() ? '${n.toInt()}' : '$n';
 }
 
 class _ReadOnRow extends StatelessWidget {
@@ -612,13 +693,11 @@ class _RoundIconButton extends StatelessWidget {
   const _RoundIconButton({
     required this.icon,
     required this.onTap,
-    this.filled = false,
     this.small = false,
   });
 
   final IconData icon;
   final VoidCallback? onTap;
-  final bool filled;
   final bool small;
 
   @override
@@ -626,7 +705,7 @@ class _RoundIconButton extends StatelessWidget {
     final c = context.colors;
     final size = small ? 40.0 : 56.0;
     return Material(
-      color: filled ? c.primary : c.surfaceContainerHigh,
+      color: c.surfaceContainerHigh,
       shape: const CircleBorder(),
       child: InkWell(
         customBorder: const CircleBorder(),
@@ -639,9 +718,7 @@ class _RoundIconButton extends StatelessWidget {
             size: small ? 20 : 28,
             color: onTap == null
                 ? c.onSurface.withValues(alpha: 0.3)
-                : filled
-                    ? c.onPrimary
-                    : c.onSurface,
+                : c.onSurface,
           ),
         ),
       ),

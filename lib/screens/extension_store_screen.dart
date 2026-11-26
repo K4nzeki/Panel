@@ -104,8 +104,9 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
               icon: Icons.extension_outlined,
               title: 'Add an extension repo',
               message: 'Paste a repo link (for example Keiyoushi) to browse '
-                  'and install extensions. Panel also uses the sites of '
-                  'installed extensions to find missing covers.',
+                  'and install extensions. Panel can read chapters from the '
+                  'sites of installed extensions and uses them to find '
+                  'missing covers.',
               action: FilledButton.icon(
                 onPressed: () => showAddRepoDialog(context, ref),
                 icon: const Icon(Icons.add_link_rounded),
@@ -129,7 +130,8 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
                               padding: const EdgeInsets.all(12),
                               child: Text(
                                 '${store.repos[entry.key]?.name ?? entry.key}: '
-                                '${entry.value}',
+                                '${entry.value}'
+                                '${(store.repos[entry.key]?.extensions.isNotEmpty ?? false) ? ' Showing the copy saved on this phone.' : ''}',
                                 style: context.text.bodySmall
                                     ?.copyWith(color: c.onErrorContainer),
                               ),
@@ -199,9 +201,11 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
                         Padding(
                           padding: const EdgeInsets.only(top: 12),
                           child: Text(
-                            'Panel searches these sites for covers it can\'t '
-                            'find elsewhere. To read chapters, open the '
-                            'extensions in a reader app like Mihon.',
+                            'Panel reads chapters from these sites directly '
+                            '(pick one as a title\'s source) and searches them '
+                            'for missing covers. Sites using the Madara or '
+                            'MangaThemesia themes work; others need a reader '
+                            'app like Mihon.',
                             style: context.text.bodySmall
                                 ?.copyWith(color: c.onSurfaceVariant),
                           ),

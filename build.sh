@@ -3,18 +3,13 @@
 # Output: build/app/outputs/flutter-apk/Panel-<version>.apk
 set -e
 cd "$(dirname "$0")"
-[ -f env.json ] || { echo "env.json is missing. Copy env.example.json to env.json and fill it in."; exit 1; }
-if grep -q "your_key_here" env.json; then
-  echo "env.json still has the placeholder key. Paste your real publishable key (Supabase -> Project Settings -> API Keys)."
-  exit 1
-fi
 
 flutter clean
 flutter pub get
 flutter upgrade
 flutter analyze
 flutter test
-flutter build apk --release --dart-define-from-file=env.json
+flutter build apk --release
 
 echo
 echo "Done. Upload this file to the GitHub release:"

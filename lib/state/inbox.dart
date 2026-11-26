@@ -4,7 +4,6 @@ import 'package:flutter/widgets.dart' show AppLifecycleListener;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../services/inbox.dart';
-import 'providers.dart';
 
 /// The Updates tab: "new chapter" alerts, newest first. Reloads when the
 /// app comes back to the screen, since the background job may have added
@@ -12,11 +11,8 @@ import 'providers.dart';
 class InboxNotifier extends Notifier<List<ChapterAlert>> {
   AppLifecycleListener? _lifecycle;
 
-  String? get _uid => ref.read(userIdProvider);
-
   @override
   List<ChapterAlert> build() {
-    ref.watch(userIdProvider); // new account, new inbox
     _lifecycle?.dispose();
     _lifecycle = AppLifecycleListener(onResume: () => unawaited(reload()));
     ref.onDispose(() => _lifecycle?.dispose());
@@ -25,19 +21,16 @@ class InboxNotifier extends Notifier<List<ChapterAlert>> {
   }
 
   Future<void> reload() async {
-    final uid = _uid;
-    state = uid == null ? const [] : await Inbox.load(uid);
+    state = await Inbox.load();
   }
 
   /// Applies [change] to what's saved now (the background job may have
   /// added alerts since the last load), then saves.
   Future<void> _update(
       List<ChapterAlert> Function(List<ChapterAlert> current) change) async {
-    final uid = _uid;
-    if (uid == null) return;
-    final next = change(await Inbox.load(uid));
+    final next = change(await Inbox.load());
     state = next;
-    await Inbox.save(uid, next);
+    await Inbox.save(next);
   }
 
   Future<void> markRead(String entryId) async {

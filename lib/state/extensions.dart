@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
@@ -6,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart' show AppLifecycleListener;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/extension_covers.dart';
@@ -77,6 +79,10 @@ class ExtensionStoreState {
 /// Extension repos the user added, what they list, and which extensions
 /// are installed. Installing downloads the APK and opens Android's
 /// installer (extensions are separate apps, like in Mihon).
+///
+/// The last good copy of every repo is saved on the phone, so browsing the
+/// store, the installed list and the reading sources all work offline; the
+/// repos are re-downloaded when there's a connection.
 class ExtensionStoreNotifier extends Notifier<ExtensionStoreState> {
   static const _reposKey = 'ext_repos_v1';
   static const _channel = MethodChannel('com.readlist.panel/updater');
@@ -101,8 +107,52 @@ class ExtensionStoreNotifier extends Notifier<ExtensionStoreState> {
 
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
-    state = state.copyWith(repoUrls: prefs.getStringList(_reposKey) ?? const []);
+    final urls = prefs.getStringList(_reposKey) ?? const <String>[];
+    final cached = await _readCache();
+    state = state.copyWith(repoUrls: urls, repos: {
+      for (final u in urls)
+        if (cached[u] case final r?) u: r,
+    });
+    // Installed apps are on the phone: show them before the network answers.
+    await refreshInstalled();
     await refresh();
+  }
+
+  // ---- Offline copy of the repos ----
+
+  static Future<File?> _cacheFile() async {
+    if (kIsWeb) return null;
+    final dir = await getApplicationSupportDirectory();
+    return File('${dir.path}${Platform.pathSeparator}ext_repos_v1.json');
+  }
+
+  static Future<Map<String, ExtRepo>> _readCache() async {
+    try {
+      final f = await _cacheFile();
+      if (f == null || !await f.exists()) return const {};
+      final j = jsonDecode(await f.readAsString());
+      if (j is! List) return const {};
+      return {
+        for (final r in j)
+          if (ExtRepo.fromJson(r) case final repo?) repo.url: repo,
+      };
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  Future<void> _writeCache() async {
+    try {
+      final f = await _cacheFile();
+      if (f == null) return;
+      final tmp = File('${f.path}.tmp');
+      await tmp.writeAsString(jsonEncode([
+        for (final u in state.repoUrls)
+          if (state.repos[u] case final r? when r.extensions.isNotEmpty)
+            r.toJson(),
+      ]));
+      await tmp.rename(f.path);
+    } catch (_) {}
   }
 
   Future<void> _saveUrls(List<String> urls) async {
@@ -123,6 +173,7 @@ class ExtensionStoreNotifier extends Notifier<ExtensionStoreState> {
         }),
     ]);
     state = state.copyWith(repos: repos, repoErrors: errors, loading: false);
+    if (errors.length < state.repoUrls.length) unawaited(_writeCache());
     await refreshInstalled();
   }
 
@@ -184,6 +235,7 @@ class ExtensionStoreNotifier extends Notifier<ExtensionStoreState> {
       repos: {...state.repos, url: repo},
       repoErrors: {...state.repoErrors}..remove(url),
     );
+    unawaited(_writeCache());
     await _saveCoverSources();
     return repo;
   }
@@ -196,6 +248,7 @@ class ExtensionStoreNotifier extends Notifier<ExtensionStoreState> {
       repos: {...state.repos}..remove(url),
       repoErrors: {...state.repoErrors}..remove(url),
     );
+    unawaited(_writeCache());
     await _saveCoverSources();
   }
 

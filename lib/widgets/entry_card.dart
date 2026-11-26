@@ -2,7 +2,10 @@ import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/entry.dart';
+import '../screens/chapters_screen.dart';
+import '../state/downloads.dart';
 import '../state/providers.dart';
+import '../state/reader.dart';
 import '../theme.dart';
 import '../utils/dates.dart';
 import 'common.dart';
@@ -16,8 +19,9 @@ String chapterLabel(Entry e) {
   return total != null ? 'Ch ${e.chapter} / $total' : 'Ch ${e.chapter}';
 }
 
-/// List row: cover, title, status, progress, and a big "+1" button.
-/// Swipe left → delete, after a confirmation (with Undo).
+/// List row: cover, title, status, progress, and a big Resume button that
+/// opens the reader where you stopped. Swipe left → delete, after a
+/// confirmation (with Undo).
 class EntryTile extends ConsumerWidget {
   const EntryTile({super.key, required this.entry, this.dragHandle});
 
@@ -85,11 +89,11 @@ class EntryTile extends ConsumerWidget {
                           if (entry.reread > 0)
                             TagChip('×${entry.reread}',
                                 icon: Icons.replay_rounded),
-                          if (ref.watch(pendingIdsProvider
-                              .select((ids) => ids.contains(entry.id))))
+                          if (ref.watch(downloadsProvider.select((s) =>
+                              s.done.values.any((d) => d.entryId == entry.id))))
                             Tooltip(
-                              message: 'Not synced yet',
-                              child: Icon(Icons.cloud_upload_outlined,
+                              message: 'Has downloaded chapters',
+                              child: Icon(Icons.download_done_rounded,
                                   size: 16, color: c.onSurfaceVariant),
                             ),
                         ],
@@ -129,8 +133,7 @@ class EntryTile extends ConsumerWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
-                dragHandle ??
-                    _PlusOneButton(onTap: () => _bump(context, ref, 1)),
+                dragHandle ?? ResumeButton(entry: entry),
               ],
             ),
           ),
@@ -138,42 +141,65 @@ class EntryTile extends ConsumerWidget {
       ),
     );
   }
-
-  Future<void> _bump(BuildContext context, WidgetRef ref, int by) async {
-    try {
-      await ref.read(entriesProvider.notifier).bumpChapter(entry, by);
-    } catch (e) {
-      if (context.mounted) showSnack(context, friendlyError(e), error: true);
-    }
-  }
 }
 
-class _PlusOneButton extends StatelessWidget {
-  const _PlusOneButton({required this.onTap});
-  final VoidCallback onTap;
+/// Opens the reader at your last chapter and page — or the next unread
+/// chapter (the first one, if you haven't started). The first time, it asks
+/// which source to read from.
+class ResumeButton extends ConsumerWidget {
+  const ResumeButton({super.key, required this.entry, this.compact = false});
+  final Entry entry;
+
+  /// Smaller round version for grid cards.
+  final bool compact;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final c = context.colors;
+    final started = ref.watch(readingLinksProvider
+            .select((m) => m[entry.id]?.hasProgress ?? false)) ||
+        entry.chapter > 0;
+    Future<void> go() async {
+      try {
+        await resumeReading(context, ref, entry);
+      } catch (e) {
+        if (context.mounted) showSnack(context, friendlyError(e), error: true);
+      }
+    }
+
+    final label = started ? 'Resume' : 'Start reading';
+    if (compact) {
+      return Tooltip(
+        message: label,
+        child: Material(
+          color: c.primary,
+          shape: const CircleBorder(),
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: go,
+            child: Padding(
+              padding: const EdgeInsets.all(6),
+              child: Icon(Icons.play_arrow_rounded, color: c.onPrimary, size: 22),
+            ),
+          ),
+        ),
+      );
+    }
     return Tooltip(
-      message: 'Read next chapter',
+      message: label,
       child: Material(
         color: c.primary.withValues(alpha: 0.14),
         borderRadius: BorderRadius.circular(16),
         child: InkWell(
           borderRadius: BorderRadius.circular(16),
-          onTap: onTap,
+          onTap: go,
           child: SizedBox(
             width: 52,
             height: 52,
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.add_rounded, color: c.primary, size: 22),
-                Text('1',
-                    style: context.text.labelSmall?.copyWith(
-                        color: c.primary, fontWeight: FontWeight.w800)),
-              ],
+            child: Icon(
+              started ? Icons.play_arrow_rounded : Icons.menu_book_rounded,
+              color: c.primary,
+              size: 28,
             ),
           ),
         ),
@@ -263,6 +289,11 @@ class EntryGridCard extends ConsumerWidget {
                 right: 8,
                 child: NewChaptersBadge(entry.unreadChapters),
               ),
+            Positioned(
+              right: 8,
+              bottom: 52,
+              child: ResumeButton(entry: entry, compact: true),
+            ),
             Positioned(
               left: 10,
               right: 10,

@@ -51,7 +51,7 @@ flutter {
 }
 
 dependencies {
-    // AppCompat theme for the fingerprint / face prompt (local_auth).
+    // AppCompat themes in res/values*/styles.xml.
     implementation("androidx.appcompat:appcompat:1.7.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
 }

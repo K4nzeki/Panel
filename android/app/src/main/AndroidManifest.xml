@@ -1,7 +1,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET"/>
-    <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
+    <!-- Downloaded chapters are saved in Panel's own folder on the phone's
+         storage (Android/data/com.readlist.panel/files/Panel Downloads).
+         Android lets an app use that folder without any storage permission
+         on every version, so READ/WRITE_EXTERNAL_STORAGE and
+         MANAGE_EXTERNAL_STORAGE are deliberately NOT requested. -->
     <!-- Lets the app open the installer for updates downloaded from GitHub. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <!-- Lets the extension store see which Mihon / Tachiyomi extensions are

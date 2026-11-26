@@ -1,7 +1,7 @@
 name: panel
 description: Panel — track the manga, manhwa, manhua and comics you read.
 publish_to: "none"
-version: 1.9.0+9
+version: 2.0.0+10
 
 environment:
   sdk: ">=3.7.0 <4.0.0"
@@ -11,21 +11,21 @@ dependencies:
   flutter:
     sdk: flutter
   material_ui: ^1.11.1
-  supabase_flutter: ^2.8.0
   flutter_riverpod: ^3.5.0
   http: ^1.2.2
   shared_preferences: ^2.3.2
   url_launcher: ^6.3.0
   intl: ^0.20.2
-  local_auth: ^3.0.0
   file_picker: ^10.3.3
   archive: ^4.0.4
-  # Reads extension sites' search pages to find missing covers.
+  # Reads extension sites' pages: chapters, page images, missing covers.
   html: ^0.15.5
   # New-chapter checks in the background + notifications.
   workmanager: ^0.10.3
   # Pinned below 20: newer versions need compileSdk 37 / AGP 9.1.
   flutter_local_notifications: ^19.4.2
+  # Where downloaded chapters, saved chapter lists and repo copies live.
+  path_provider: ^2.1.5
 
 dev_dependencies:
   flutter_test:

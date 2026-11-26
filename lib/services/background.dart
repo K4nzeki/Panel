@@ -1,13 +1,12 @@
 import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:workmanager/workmanager.dart';
 
-import '../config.dart';
 import 'anilist.dart';
 import 'extension_covers.dart';
 import 'inbox.dart';
+import 'local_store.dart';
 import 'update_checker.dart';
 
 const _taskName = 'panel-check-updates';
@@ -42,42 +41,42 @@ class Background {
   }
 }
 
-/// Runs in a separate isolate started by Android's WorkManager, so it sets
-/// up Supabase itself. The saved login is read from the phone's storage.
+/// Runs in a separate isolate started by Android's WorkManager. Reads the
+/// list saved on the phone and saves what it finds as patches the app picks
+/// up next time it opens (see [LocalStore]).
 @pragma('vm:entry-point')
 void callbackDispatcher() {
   Workmanager().executeTask((task, input) async {
     WidgetsFlutterBinding.ensureInitialized();
     try {
-      if (!AppConfig.isConfigured) return true;
-      await Supabase.initialize(
-        url: AppConfig.supabaseUrl,
-        publishableKey: AppConfig.supabaseKey,
-        authOptions: const FlutterAuthClientOptions(detectSessionInUri: false),
-      );
-      final db = Supabase.instance.client;
-      final uid = db.auth.currentUser?.id;
-      if (uid == null) return true; // signed out: nothing to check
+      final entries = await LocalStore.readEntries();
+      if (entries.isEmpty) return true;
 
       await Notifications.init();
-      final checker = UpdateChecker(db, uid);
+      final checker = UpdateChecker();
       // New chapters for what you're reading (skipped if the app already
       // checked in the last 5 hours), then covers for titles missing one.
       // Progress shows as a quiet notification instead of in the app.
       if (await checker.isDue()) {
         try {
           final updates = await checker.run(
+            entries,
+            LocalStore.addBackgroundPatch,
             onProgress: (done, total) => Notifications.showProgress(
                 Notifications.chaptersProgressId, 'Checking for new chapters',
                 done: done, total: total),
           );
-          await Notifications.showUpdates(uid, updates);
+          await Notifications.showUpdates(updates);
+        } on UpdateOffline {
+          return true; // WorkManager only runs us when online; try next time
         } finally {
           await Notifications.endProgress(Notifications.chaptersProgressId);
         }
       }
       try {
         await checker.fillCovers(
+          await LocalStore.readEntries(),
+          LocalStore.addBackgroundPatch,
           AniListService(),
           extensions: await ExtensionCoverFinder.load(),
           onProgress: (done, total) => Notifications.showProgress(
@@ -101,7 +100,7 @@ class Notifications {
   // Fixed ids for the "working on it" notifications.
   static const chaptersProgressId = 9001;
   static const coversProgressId = 9002;
-  static const syncProgressId = 9003;
+  static const downloadProgressId = 9003;
 
   /// Payload of the summary notification: opens the Updates tab.
   static const updatesPayload = 'updates';
@@ -148,10 +147,9 @@ class Notifications {
 
   /// Saves the alerts for the Updates tab, then shows one notification per
   /// series (tap opens it) plus a summary when there are several.
-  static Future<void> showUpdates(
-      String userId, List<SeriesUpdate> updates) async {
+  static Future<void> showUpdates(List<SeriesUpdate> updates) async {
     if (updates.isEmpty) return;
-    await Inbox.add(userId, updates);
+    await Inbox.add(updates);
     if (!Background.supported) return;
     await init();
     for (final u in updates.take(10)) {
@@ -197,7 +195,7 @@ class Notifications {
   }
 
   /// A quiet, ongoing notification for work in progress (checking chapters,
-  /// finding covers, syncing). No sound or vibration; updates in place, at
+  /// finding covers, downloading). No sound or vibration; updates in place, at
   /// most about twice a second (Android drops faster updates). Leave
   /// [total] null for a spinner-style bar.
   static Future<void> showProgress(int id, String title,
@@ -224,7 +222,7 @@ class Notifications {
             'background_work',
             'Background activity',
             channelDescription:
-                'Shows while Panel checks chapters, finds covers or syncs',
+                'Shows while Panel checks chapters, finds covers or downloads',
             importance: Importance.low,
             priority: Priority.low,
             ongoing: true,

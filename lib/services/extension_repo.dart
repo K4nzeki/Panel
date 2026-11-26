@@ -78,6 +78,40 @@ class Extension {
     if (i >= 0 && i + 1 < parts.length) return parts[i + 1];
     return sources.isEmpty ? 'all' : sources.first.lang;
   }
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'pkg': pkg,
+        'apk': apkUrl,
+        'icon': iconUrl,
+        'version_name': versionName,
+        'version_code': versionCode,
+        'lib': libVersion,
+        'rating': rating.index,
+        'sources': [for (final s in sources) s.toJson()],
+      };
+
+  static Extension? fromJson(Object? j, String repoUrl) {
+    if (j is! Map) return null;
+    final name = j['name'], pkg = j['pkg'], apk = j['apk'];
+    if (name is! String || pkg is! String || apk is! String) return null;
+    final r = (j['rating'] as num?)?.toInt() ?? 0;
+    return Extension(
+      name: name,
+      pkg: pkg,
+      apkUrl: apk,
+      iconUrl: j['icon'] as String?,
+      versionName: '${j['version_name'] ?? ''}',
+      versionCode: (j['version_code'] as num?)?.toInt() ?? 0,
+      libVersion: '${j['lib'] ?? ''}',
+      rating: ContentRating.values[r.clamp(0, ContentRating.values.length - 1)],
+      sources: [
+        for (final s in (j['sources'] as List?) ?? const [])
+          if (ExtSource.fromJson(s) case final src?) src,
+      ],
+      repoUrl: repoUrl,
+    );
+  }
 }
 
 /// A repo's name and the extensions it lists.
@@ -97,6 +131,31 @@ class ExtRepo {
   /// Signing key fingerprint the repo says its APKs are signed with.
   final String? fingerprint;
   final List<Extension> extensions;
+
+  /// Saved copy, so the store and reading sources work offline.
+  Map<String, dynamic> toJson() => {
+        'url': url,
+        'name': name,
+        'website': website,
+        'fingerprint': fingerprint,
+        'extensions': [for (final e in extensions) e.toJson()],
+      };
+
+  static ExtRepo? fromJson(Object? j) {
+    if (j is! Map) return null;
+    final url = j['url'];
+    if (url is! String) return null;
+    return ExtRepo(
+      url: url,
+      name: '${j['name'] ?? url}',
+      website: j['website'] as String?,
+      fingerprint: j['fingerprint'] as String?,
+      extensions: [
+        for (final e in (j['extensions'] as List?) ?? const [])
+          if (Extension.fromJson(e, url) case final ext?) ext,
+      ],
+    );
+  }
 }
 
 class ExtensionRepoException implements Exception {

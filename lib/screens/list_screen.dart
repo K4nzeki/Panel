@@ -39,9 +39,7 @@ class _ListScreenState extends ConsumerState<ListScreen> {
     final query = ref.watch(listQueryProvider(widget.tab));
     final visible = ref.watch(visibleEntriesProvider(widget.tab));
     final counts = ref.watch(statusCountsProvider);
-    final syncError = ref.watch(syncErrorProvider);
     final online = ref.watch(onlineProvider);
-    final pending = ref.watch(pendingCountProvider);
 
     final totalInTab = _isLibrary
         ? counts.entries
@@ -64,12 +62,9 @@ class _ListScreenState extends ConsumerState<ListScreen> {
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
             _Header(tab: widget.tab, query: query, total: totalInTab),
-            if (syncError != null)
-              SliverToBoxAdapter(child: _SyncBanner(message: syncError)),
-            // Syncing, checking chapters and finding covers show as quiet
+            // Checking chapters, finding covers and downloads show as quiet
             // notifications instead of banners; only "offline" shows here.
-            if (!online)
-              SliverToBoxAdapter(child: _OfflineBanner(pending: pending)),
+            if (!online) const SliverToBoxAdapter(child: _OfflineBanner()),
             if (_isLibrary && totalInTab > 0)
               const SliverToBoxAdapter(child: _SummaryStrip()),
             if (totalInTab > 0) ...[
@@ -121,7 +116,7 @@ class _ListScreenState extends ConsumerState<ListScreen> {
         SliverFillRemaining(
           hasScrollBody: false,
           child: EmptyState(
-            icon: Icons.cloud_off_rounded,
+            icon: Icons.error_outline_rounded,
             title: "Couldn't load your list",
             message: friendlyError(async.error!),
             action: FilledButton(
@@ -141,7 +136,7 @@ class _ListScreenState extends ConsumerState<ListScreen> {
                   icon: Icons.auto_stories_rounded,
                   title: 'Start your library',
                   message:
-                      'Add what you’re reading and tap +1 each time you finish a chapter.',
+                      'Add what you’re reading, then tap Resume to read it here — online or from downloads.',
                   action: FilledButton.icon(
                     onPressed: () => showAddTitleSheet(context),
                     icon: const Icon(Icons.add_rounded),
@@ -269,7 +264,6 @@ class _Header extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.colors;
-    final username = ref.watch(profileProvider).value?.username;
     final isLibrary = tab == ListTab.library;
     final controller = ref.read(listQueryProvider(tab).notifier);
 
@@ -284,7 +278,7 @@ class _Header extends ConsumerWidget {
         children: [
           Text(
             isLibrary
-                ? '${timeGreeting()}${username != null ? ', $username' : ''}'
+                ? timeGreeting()
                 : '$total saved for later',
             style: context.text.labelLarge?.copyWith(color: c.onSurfaceVariant),
           ),
@@ -468,52 +462,12 @@ class _FilterBar extends ConsumerWidget {
   }
 }
 
-class _SyncBanner extends ConsumerWidget {
-  const _SyncBanner({required this.message});
-  final String message;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final c = context.colors;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Material(
-        color: c.errorContainer,
-        borderRadius: BorderRadius.circular(14),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
-          child: Row(children: [
-            Icon(Icons.sync_problem_rounded, color: c.onErrorContainer),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(message,
-                  style: context.text.bodySmall
-                      ?.copyWith(color: c.onErrorContainer)),
-            ),
-            IconButton(
-              tooltip: 'Dismiss',
-              onPressed: () =>
-                  ref.read(entriesProvider.notifier).clearSyncError(),
-              icon: Icon(Icons.close_rounded, color: c.onErrorContainer),
-            ),
-          ]),
-        ),
-      ),
-    );
-  }
-}
-
 class _OfflineBanner extends ConsumerWidget {
-  const _OfflineBanner({required this.pending});
-  final int pending;
+  const _OfflineBanner();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.colors;
-    final changes = pending == 1 ? '1 change' : '$pending changes';
-    final text = pending > 0
-        ? "You're offline. $changes will sync when you're back online."
-        : "You're offline. Changes will sync when you reconnect.";
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       child: Material(
@@ -525,12 +479,17 @@ class _OfflineBanner extends ConsumerWidget {
             Icon(Icons.cloud_off_rounded, color: c.onSecondaryContainer),
             const SizedBox(width: 10),
             Expanded(
-              child: Text(text,
-                  style: context.text.bodySmall
-                      ?.copyWith(color: c.onSecondaryContainer)),
+              child: Text(
+                "You're offline. Your library, progress and downloaded "
+                'chapters all work; new chapters and covers update when '
+                "you're back online.",
+                style: context.text.bodySmall
+                    ?.copyWith(color: c.onSecondaryContainer),
+              ),
             ),
             TextButton(
-              onPressed: () => ref.read(entriesProvider.notifier).refresh(),
+              onPressed: () =>
+                  ref.read(entriesProvider.notifier).refresh(manual: true),
               child: const Text('Retry'),
             ),
           ]),

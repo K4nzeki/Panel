@@ -1,4 +1,4 @@
-/// Kinds of titles the app tracks. Stored in Supabase as their [label].
+/// Kinds of titles the app tracks. Saved as their [label].
 enum EntryType {
   manga('Manga'),
   manhwa('Manhwa'),
@@ -20,7 +20,7 @@ enum EntryType {
   static EntryType parse(String? raw) => tryParse(raw) ?? EntryType.manga;
 }
 
-/// Reading status. Stored in Supabase as their [label].
+/// Reading status. Saved as their [label].
 enum EntryStatus {
   toRead('To Read'),
   reading('Reading'),
@@ -52,12 +52,6 @@ enum EntryStatus {
     EntryStatus.cancelled,
   ];
 }
-
-/// Columns fetched for an entry — kept in one place so every query agrees.
-const entryColumns =
-    'id, title, type, chapter, status, reread, created_at, cover_url, author, '
-    'total_chapters, read_on_url, last_read_at, position, source_id, '
-    'latest_chapter, latest_checked_at';
 
 /// [Entry.sourceId] value for "looked for it on the sources, found nothing".
 /// Stops the background check from searching again every time; linking a

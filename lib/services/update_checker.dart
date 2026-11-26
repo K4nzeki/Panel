@@ -1,5 +1,4 @@
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/entry.dart';
 import 'anilist.dart';
@@ -14,20 +13,23 @@ class SeriesUpdate {
   int get unread => latest - entry.chapter;
 }
 
-/// Checks the titles you're reading for new chapters. Used by both the app
-/// (when it opens and it's been 5 hours) and the background job, so it talks
-/// to Supabase directly instead of going through the app's state.
-class UpdateChecker {
-  UpdateChecker(this._db, this.userId, {MangaDexService? source})
-      : _source = source ?? MangaDexService();
+/// Saves a change to one entry (entry column names, e.g. `latest_chapter`).
+/// The app applies it to its list; the background job saves it as a patch
+/// for the app to pick up.
+typedef PatchSaver = Future<void> Function(String id, Map<String, dynamic> patch);
 
-  final SupabaseClient _db;
-  final String userId;
+/// Checks the titles you're reading for new chapters. Used by both the app
+/// (when it opens and it's been 5 hours) and the background job. Works on
+/// a list handed to it and reports changes through a [PatchSaver], so it
+/// doesn't care where the list lives.
+class UpdateChecker {
+  UpdateChecker({MangaDexService? source}) : _source = source ?? MangaDexService();
+
   final MangaDexService _source;
 
   static const interval = Duration(hours: 5);
 
-  String get _lastKey => 'updates_last_check_v1_$userId';
+  static const _lastKey = 'updates_last_check_v2';
 
   Future<DateTime?> lastCheck() async {
     final prefs = await SharedPreferences.getInstance();
@@ -41,42 +43,40 @@ class UpdateChecker {
     return last == null || DateTime.now().difference(last) >= interval;
   }
 
-  /// Runs one check. Links unlinked titles first (exact title match only),
-  /// then reads the newest chapter of each linked title. Returns the titles
-  /// whose newest chapter went up since the last check and that you haven't
-  /// read yet (these get a notification).
+  /// Runs one check over [all]. Links unlinked titles first (exact title
+  /// match only), then reads the newest chapter of each linked title.
+  /// Returns the titles whose newest chapter went up since the last check
+  /// and that you haven't read yet (these get a notification).
   ///
-  /// Stops early and keeps what it saved if the connection drops.
-  /// [onProgress] gets (titles done, titles to check) as it goes.
-  Future<List<SeriesUpdate>> run(
+  /// Throws [UpdateOffline] if the connection drops before anything was
+  /// checked; stops early (keeping what it saved) if it drops later.
+  Future<List<SeriesUpdate>> run(List<Entry> all, PatchSaver save,
       {void Function(int done, int total)? onProgress}) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_lastKey, DateTime.now().millisecondsSinceEpoch);
 
-    final rows = await _db
-        .from('entries')
-        .select(entryColumns)
-        .eq('user_id', userId)
-        .eq('status', EntryStatus.reading.label);
-    final entries = rows
-        .map(Entry.fromJson)
-        .where((e) => e.type != EntryType.comic) // not on MangaDex
+    final entries = all
+        .where((e) =>
+            e.status == EntryStatus.reading &&
+            e.type != EntryType.comic) // not on MangaDex
         .toList();
 
     final updates = <SeriesUpdate>[];
     var done = 0;
+    var reached = false;
     onProgress?.call(0, entries.length);
     for (var e in entries) {
       onProgress?.call(done++, entries.length);
       try {
         if (e.sourceId == null) {
-          e = await _link(e);
+          e = await _link(e, save);
           await _pause();
         }
         final id = MangaDexService.idFrom(e.sourceId);
         if (id == null) continue;
 
         final latest = await _source.latestChapter(id);
+        reached = true;
         await _pause();
         final now = DateTime.now().toUtc().toIso8601String();
         final patch = <String, dynamic>{'latest_checked_at': now};
@@ -88,15 +88,15 @@ class UpdateChecker {
             updates.add(SeriesUpdate(e, latest));
           }
         }
-        await _patch(e.id, patch);
+        await save(e.id, patch);
       } on MangaDexException catch (err) {
+        reached = true;
         if (err.rateLimited) {
           await Future<void>.delayed(const Duration(seconds: 10));
         }
         // Skip this title this round.
-      } on PostgrestException {
-        rethrow;
       } catch (_) {
+        if (!reached) throw const UpdateOffline();
         break; // offline / timeout — try again next time
       }
     }
@@ -105,47 +105,42 @@ class UpdateChecker {
 
   /// Finds the title on MangaDex. Saves the link (or [noSourceFound]) and
   /// fills in a missing cover.
-  Future<Entry> _link(Entry e) async {
+  Future<Entry> _link(Entry e, PatchSaver save) async {
     final match = await _source.findExact(e.title);
     if (match == null) {
-      await _patch(e.id, {'source_id': noSourceFound});
+      await save(e.id, {'source_id': noSourceFound});
       return e.copyWith(sourceId: const Nullable(noSourceFound));
     }
     final patch = <String, dynamic>{'source_id': match.sourceId};
     final noCover = e.coverUrl == null || e.coverUrl!.trim().isEmpty;
     if (noCover && match.coverUrl != null) patch['cover_url'] = match.coverUrl;
-    await _patch(e.id, patch);
+    await save(e.id, patch);
     return e.copyWith(sourceId: Nullable(match.sourceId));
   }
 
-  String get _noCoverKey => 'covers_not_found_v1_$userId';
+  static const _noCoverKey = 'covers_not_found_v2';
+  static const _noCoverSigKey = 'covers_not_found_sig_v2';
 
-  /// Finds covers for titles that don't have one (AniList first, then
-  /// MangaDex, then the sites of installed extensions), plus a missing
+  /// Finds covers for titles in [all] that don't have one (AniList first,
+  /// then MangaDex, then the sites of installed extensions), plus a missing
   /// author / chapter count. Titles no source has are remembered so they
   /// aren't searched every time (forgotten when extensions change). Stops
   /// quietly when offline. Used by the background job.
-  Future<int> fillCovers(AniListService anilist,
+  Future<int> fillCovers(List<Entry> all, PatchSaver save, AniListService anilist,
       {int max = 80,
       ExtensionCoverFinder? extensions,
       void Function(int done, int total)? onProgress}) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.reload();
     final ext = extensions ?? ExtensionCoverFinder.empty;
-    final sig = 'covers_not_found_sig_v1_$userId';
-    if (prefs.getString(sig) != ext.signature) {
+    if (prefs.getString(_noCoverSigKey) != ext.signature) {
       await prefs.remove(_noCoverKey);
-      await prefs.setString(sig, ext.signature);
+      await prefs.setString(_noCoverSigKey, ext.signature);
     }
     final skip = {...?prefs.getStringList(_noCoverKey)};
-    final rows = await _db
-        .from('entries')
-        .select(entryColumns)
-        .eq('user_id', userId)
-        .or('cover_url.is.null,cover_url.eq.');
-    final todo = rows
-        .map(Entry.fromJson)
+    final todo = all
         .where((e) =>
+            (e.coverUrl == null || e.coverUrl!.trim().isEmpty) &&
             (e.type != EntryType.comic || ext.isNotEmpty) &&
             !skip.contains(normalizeTitle(e.title)))
         .take(max)
@@ -181,7 +176,7 @@ class UpdateChecker {
         // Only remember "not found" when every source actually answered.
         if (!errored) skip.add(normalizeTitle(e.title));
       } else {
-        await _patch(e.id, {
+        await save(e.id, {
           'cover_url': cover,
           if (e.author == null && match?.author != null) 'author': match!.author,
           if (e.totalChapters == null && match?.totalChapters != null)
@@ -195,10 +190,14 @@ class UpdateChecker {
     return found;
   }
 
-  Future<void> _patch(String id, Map<String, dynamic> patch) =>
-      _db.from('entries').update(patch).eq('id', id).eq('user_id', userId);
-
   // Stay well under MangaDex's ~5 requests/second.
   Future<void> _pause() =>
       Future<void>.delayed(const Duration(milliseconds: 350));
+}
+
+/// The check couldn't reach anything (no connection).
+class UpdateOffline implements Exception {
+  const UpdateOffline();
+  @override
+  String toString() => "You're offline.";
 }

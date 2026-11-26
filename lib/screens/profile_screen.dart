@@ -1,13 +1,13 @@
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../config.dart';
 import '../models/entry.dart';
+import '../services/downloads.dart';
 import '../services/sheet_file.dart';
-import '../state/app_lock.dart';
+import '../state/downloads.dart';
 import '../state/extensions.dart';
 import '../state/providers.dart';
 import '../theme.dart';
@@ -17,20 +17,19 @@ import '../utils/sheet_import.dart';
 import '../widgets/common.dart';
 import '../widgets/entry_sheet.dart';
 import '../widgets/update_dialog.dart';
-import 'community_screen.dart';
 import 'extension_store_screen.dart';
 
+/// Settings tab. Panel has no accounts: everything here is saved on this
+/// phone only.
 class ProfileScreen extends ConsumerWidget {
   const ProfileScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final profile = ref.watch(profileProvider);
-    final email = ref.watch(userEmailProvider) ?? '';
     final themeMode = ref.watch(themeModeProvider);
     final c = context.colors;
-    final p = profile.value;
-    final name = p?.username ?? email.split('@').first;
+    final downloads = ref.watch(downloadsProvider);
+    final size = ref.watch(downloadsSizeProvider).value;
 
     return Scaffold(
       body: CustomScrollView(
@@ -39,95 +38,18 @@ class ProfileScreen extends ConsumerWidget {
             floating: true,
             toolbarHeight: 72,
             titleSpacing: 20,
-            title: Text('Profile'),
+            title: Text('Settings'),
           ),
           SliverPadding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 40),
             sliver: SliverList.list(children: [
-              // ---- Identity card ----
               Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(18),
-                  child: Row(children: [
-                    CircleAvatar(
-                      radius: 30,
-                      backgroundColor: c.primary,
-                      child: Text(
-                        name.isEmpty ? '?' : name[0].toUpperCase(),
-                        style: context.text.headlineSmall
-                            ?.copyWith(color: c.onPrimary),
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(p?.username != null ? '@${p!.username}' : name,
-                              style: context.text.titleLarge),
-                          const SizedBox(height: 2),
-                          Text(email,
-                              style: context.text.bodySmall
-                                  ?.copyWith(color: c.onSurfaceVariant)),
-                        ],
-                      ),
-                    ),
-                    IconButton.filledTonal(
-                      tooltip: 'Edit username',
-                      onPressed: () => _editUsername(context, ref, p),
-                      icon: const Icon(Icons.edit_outlined),
-                    ),
-                  ]),
-                ),
-              ),
-
-              // ---- Sharing ----
-              const SectionLabel('Sharing'),
-              Card(
-                child: Column(children: [
-                  SwitchListTile(
-                    secondary: const Icon(Icons.public_rounded),
-                    title: const Text('Public list'),
-                    subtitle: Text(p?.username == null
-                        ? 'Set a username first so others can find you'
-                        : 'Other readers can browse your list'),
-                    value: p?.listVisible ?? true,
-                    onChanged: p == null
-                        ? null
-                        : (v) => _saveProfile(context, ref,
-                            username: p.username, listVisible: v),
-                  ),
-                  const Divider(indent: 16, endIndent: 16),
-                  ListTile(
-                    leading: const Icon(Icons.people_outline_rounded),
-                    title: const Text('Browse readers'),
-                    subtitle: const Text('See what others are reading'),
-                    trailing: const Icon(Icons.chevron_right_rounded),
-                    onTap: () => Navigator.of(context).push(MaterialPageRoute(
-                        builder: (_) => const CommunityScreen())),
-                  ),
-                ]),
-              ),
-
-              // ---- Security ----
-              const SectionLabel('Security'),
-              Card(
-                child: SwitchListTile(
-                  secondary: const Icon(Icons.fingerprint_rounded),
-                  title: const Text('Unlock with fingerprint / face'),
+                child: ListTile(
+                  leading: Icon(Icons.phone_android_rounded, color: c.primary),
+                  title: const Text('Saved on this phone'),
                   subtitle: const Text(
-                      'Stay signed in and open the app without your password'),
-                  value: ref.watch(appLockProvider.select((s) => s.enabled)),
-                  onChanged: (v) async {
-                    final err =
-                        await ref.read(appLockProvider.notifier).setEnabled(v);
-                    if (context.mounted && err != null) {
-                      showSnack(context, err, error: true);
-                    } else if (context.mounted && v &&
-                        ref.read(appLockProvider).enabled) {
-                      showSnack(context, 'App lock is on');
-                    }
-                  },
+                      'No account or password. Your list, progress and '
+                      'downloads stay on this device and work offline.'),
                 ),
               ),
 
@@ -160,14 +82,14 @@ class ProfileScreen extends ConsumerWidget {
               ),
 
               // ---- Extensions ----
-              const SectionLabel('Extensions'),
+              const SectionLabel('Sources & extensions'),
               Card(
                 child: ListTile(
                   leading: const Icon(Icons.extension_outlined),
                   title: const Text('Extension store'),
                   subtitle: Text(switch (ref.watch(extensionStoreProvider)) {
                     final s when s.repoUrls.isEmpty =>
-                      'Add a repo link to download extensions',
+                      'Add a repo to read from more sites (MangaDex is built in)',
                     final s =>
                       '${s.extensions.where(s.isInstalled).length} installed · '
                           '${s.repoUrls.length} repo${s.repoUrls.length == 1 ? '' : 's'}',
@@ -177,6 +99,61 @@ class ProfileScreen extends ConsumerWidget {
                       builder: (_) => const ExtensionStoreScreen())),
                 ),
               ),
+
+              // ---- Downloads ----
+              if (DownloadStore.supported) ...[
+                const SectionLabel('Downloads'),
+                Card(
+                  child: Column(children: [
+                    ListTile(
+                      leading: const Icon(Icons.folder_outlined),
+                      title: Text('${downloads.done.length} chapters downloaded'),
+                      subtitle: FutureBuilder<String>(
+                        future: _folderLabel(),
+                        builder: (_, snap) => Text([
+                          if (size != null) _bytes(size),
+                          snap.data ?? '…',
+                        ].join(' · ')),
+                      ),
+                    ),
+                    if (downloads.queue.isNotEmpty) ...[
+                      const Divider(indent: 16, endIndent: 16),
+                      ListTile(
+                        leading: const Icon(Icons.downloading_rounded),
+                        title: Text('${downloads.queue.length} in the queue'),
+                        subtitle: Text(downloads.waitingForConnection
+                            ? 'Paused until you are back online'
+                            : 'Downloading one chapter at a time'),
+                        trailing: TextButton(
+                          onPressed: downloads.waitingForConnection
+                              ? ref.read(downloadsProvider.notifier).resume
+                              : ref.read(downloadsProvider.notifier).cancelAll,
+                          child: Text(downloads.waitingForConnection
+                              ? 'Retry'
+                              : 'Cancel all'),
+                        ),
+                      ),
+                    ],
+                    const Divider(indent: 16, endIndent: 16),
+                    ListTile(
+                      leading: Icon(Icons.delete_sweep_outlined, color: c.error),
+                      title: const Text('Delete all downloads'),
+                      enabled: downloads.done.isNotEmpty,
+                      onTap: () async {
+                        final ok = await confirm(context,
+                            title: 'Delete all downloaded chapters?',
+                            message: 'They are removed from this phone. '
+                                'Your list and progress are kept.',
+                            action: 'Delete',
+                            destructive: true);
+                        if (ok == true) {
+                          await ref.read(downloadsProvider.notifier).deleteAll();
+                        }
+                      },
+                    ),
+                  ]),
+                ),
+              ],
 
               // ---- Your data ----
               const SectionLabel('Your data'),
@@ -192,7 +169,8 @@ class ProfileScreen extends ConsumerWidget {
                   ListTile(
                     leading: const Icon(Icons.copy_all_rounded),
                     title: const Text('Copy list to clipboard'),
-                    subtitle: const Text('Title | Chapter | Status | Type | Reread'),
+                    subtitle: const Text(
+                        'Title | Chapter | Status | Type | Reread — use it as a backup'),
                     onTap: () async {
                       final entries =
                           ref.read(entriesProvider).value ?? const [];
@@ -206,22 +184,10 @@ class ProfileScreen extends ConsumerWidget {
                 ]),
               ),
 
-              // ---- Account ----
-              const SectionLabel('Account'),
+              // ---- About ----
+              const SectionLabel('About'),
               Card(
                 child: Column(children: [
-                  ListTile(
-                    leading: const Icon(Icons.mail_outline_rounded),
-                    title: const Text('Change email'),
-                    onTap: () => _changeEmail(context, ref, email),
-                  ),
-                  const Divider(indent: 16, endIndent: 16),
-                  ListTile(
-                    leading: const Icon(Icons.lock_outline_rounded),
-                    title: const Text('Change password'),
-                    onTap: () => _changePassword(context, ref),
-                  ),
-                  const Divider(indent: 16, endIndent: 16),
                   ListTile(
                     leading: const Icon(Icons.system_update_rounded),
                     title: const Text('Check for updates'),
@@ -241,38 +207,6 @@ class ProfileScreen extends ConsumerWidget {
                   ),
                 ]),
               ),
-              const SizedBox(height: 20),
-              FilledButton.tonalIcon(
-                onPressed: () async {
-                  final pending = ref.read(pendingCountProvider);
-                  final ok = await confirm(context,
-                      title: pending > 0
-                          ? 'Sign out with $pending unsynced '
-                              '${pending == 1 ? 'change' : 'changes'}?'
-                          : 'Sign out?',
-                      action: 'Sign out');
-                  if (ok == true) {
-                    await ref.read(repositoryProvider)?.clearCache();
-                    try {
-                      await ref.read(supabaseProvider).auth.signOut();
-                    } catch (_) {
-                      // Offline: still sign out on this phone.
-                      await ref
-                          .read(supabaseProvider)
-                          .auth
-                          .signOut(scope: SignOutScope.local);
-                    }
-                  }
-                },
-                icon: const Icon(Icons.logout_rounded),
-                label: const Text('Sign out'),
-              ),
-              const SizedBox(height: 8),
-              TextButton(
-                style: TextButton.styleFrom(foregroundColor: c.error),
-                onPressed: () => _deleteAccount(context, ref),
-                child: const Text('Delete account'),
-              ),
             ]),
           ),
         ],
@@ -280,105 +214,20 @@ class ProfileScreen extends ConsumerWidget {
     );
   }
 
-  Future<void> _saveProfile(BuildContext context, WidgetRef ref,
-      {String? username, required bool listVisible}) async {
-    final uid = ref.read(userIdProvider);
-    if (uid == null) return;
-    try {
-      await ref.read(supabaseProvider).from('profiles').upsert(
-        {'id': uid, 'username': username, 'list_visible': listVisible},
-        onConflict: 'id',
-      );
-      ref.invalidate(profileProvider);
-    } on PostgrestException catch (e) {
-      if (context.mounted) {
-        showSnack(
-            context,
-            e.code == '23505'
-                ? 'That username is already taken.'
-                : e.message,
-            error: true);
-      }
-    } catch (e) {
-      if (context.mounted) showSnack(context, friendlyError(e), error: true);
-    }
+  static Future<String> _folderLabel() async {
+    final dir = await DownloadStore.root();
+    if (dir == null) return '';
+    final p = dir.path;
+    // Show the part people can find in a file manager.
+    final i = p.indexOf('Android/data/');
+    return i >= 0 ? p.substring(i) : p;
   }
 
-  Future<void> _editUsername(
-      BuildContext context, WidgetRef ref, Profile? p) async {
-    final v = await promptText(context,
-        title: 'Username', initial: p?.username ?? '', hint: 'letters, numbers, _');
-    if (v == null || !context.mounted) return;
-    final u = v.trim();
-    if (u.isNotEmpty && !RegExp(r'^[A-Za-z0-9_]{3,40}$').hasMatch(u)) {
-      showSnack(context, 'Use 3–40 letters, numbers or _', error: true);
-      return;
-    }
-    if (u == (p?.username ?? '')) return;
-    await _saveProfile(context, ref,
-        username: u.isEmpty ? null : u, listVisible: p?.listVisible ?? true);
-    if (context.mounted) showSnack(context, 'Username saved');
-  }
-
-  Future<void> _changeEmail(
-      BuildContext context, WidgetRef ref, String current) async {
-    final v = await promptText(context,
-        title: 'New email',
-        initial: current,
-        keyboard: TextInputType.emailAddress);
-    if (v == null || v.trim().isEmpty || v.trim() == current) return;
-    try {
-      await ref.read(supabaseProvider).auth.updateUser(
-            UserAttributes(email: v.trim()),
-            emailRedirectTo: AppConfig.authRedirect,
-          );
-      if (context.mounted) {
-        showSnack(context, 'Check your new inbox to confirm the change.');
-      }
-    } catch (e) {
-      if (context.mounted) showSnack(context, friendlyError(e), error: true);
-    }
-  }
-
-  Future<void> _changePassword(BuildContext context, WidgetRef ref) async {
-    final v = await promptText(context, title: 'New password (6+ characters)');
-    if (v == null || v.isEmpty) return;
-    if (v.length < 6) {
-      if (context.mounted) {
-        showSnack(context, 'Password must be at least 6 characters.',
-            error: true);
-      }
-      return;
-    }
-    try {
-      await ref
-          .read(supabaseProvider)
-          .auth
-          .updateUser(UserAttributes(password: v));
-      if (context.mounted) showSnack(context, 'Password updated');
-    } catch (e) {
-      if (context.mounted) showSnack(context, friendlyError(e), error: true);
-    }
-  }
-
-  Future<void> _deleteAccount(BuildContext context, WidgetRef ref) async {
-    final typed = await promptText(context,
-        title: 'Delete your account?',
-        hint: 'Type DELETE to confirm');
-    if (typed?.trim() != 'DELETE') {
-      if (typed != null && context.mounted) {
-        showSnack(context, 'Account not deleted.');
-      }
-      return;
-    }
-    try {
-      final db = ref.read(supabaseProvider);
-      await db.rpc('delete_own_account');
-      await ref.read(repositoryProvider)?.clearCache();
-      await db.auth.signOut();
-    } catch (e) {
-      if (context.mounted) showSnack(context, friendlyError(e), error: true);
-    }
+  static String _bytes(int b) {
+    if (b >= 1 << 30) return '${(b / (1 << 30)).toStringAsFixed(1)} GB';
+    if (b >= 1 << 20) return '${(b / (1 << 20)).toStringAsFixed(0)} MB';
+    if (b >= 1 << 10) return '${(b / (1 << 10)).toStringAsFixed(0)} KB';
+    return '$b B';
   }
 
   Future<void> _import(BuildContext context, WidgetRef ref) {
@@ -459,7 +308,7 @@ class _ImportSheetState extends ConsumerState<_ImportSheet> {
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    // Re-plan whenever the list changes (e.g. a sync finishes).
+    // Re-plan whenever the list changes.
     ref.watch(entriesProvider);
     final plan = _plan;
     final hasInput = _parsed.entries.isNotEmpty || _parsed.errors.isNotEmpty;
