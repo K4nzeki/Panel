@@ -43,6 +43,7 @@ class _ListScreenState extends ConsumerState<ListScreen> {
     final online = ref.watch(onlineProvider);
     final pending = ref.watch(pendingCountProvider);
     final coverFill = ref.watch(coverFillProvider);
+    final checking = ref.watch(updateCheckingProvider);
 
     final totalInTab = _isLibrary
         ? counts.entries
@@ -59,7 +60,8 @@ class _ListScreenState extends ConsumerState<ListScreen> {
         label: const Text('Add title'),
       ),
       body: RefreshIndicator(
-        onRefresh: () => ref.read(entriesProvider.notifier).refresh(),
+        onRefresh: () =>
+            ref.read(entriesProvider.notifier).refresh(manual: true),
         child: CustomScrollView(
           physics: const AlwaysScrollableScrollPhysics(),
           slivers: [
@@ -71,6 +73,8 @@ class _ListScreenState extends ConsumerState<ListScreen> {
                   child: _OfflineBanner(online: online, pending: pending)),
             if (coverFill != null && coverFill.total > 0)
               SliverToBoxAdapter(child: _CoverFillBanner(progress: coverFill)),
+            if (checking && _isLibrary)
+              const SliverToBoxAdapter(child: _CheckingBanner()),
             if (_isLibrary && totalInTab > 0)
               const SliverToBoxAdapter(child: _SummaryStrip()),
             if (totalInTab > 0) ...[
@@ -551,6 +555,42 @@ class _OfflineBanner extends ConsumerWidget {
 }
 
 /// Shown while covers for titles without a photo are being looked up.
+/// Shown while new chapters are being checked (the list stays usable).
+class _CheckingBanner extends StatelessWidget {
+  const _CheckingBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+      child: Material(
+        color: c.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(14),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(children: [
+                Icon(Icons.update_rounded, size: 18, color: c.onSurfaceVariant),
+                const SizedBox(width: 10),
+                Text(
+                  'Checking for new chapters…',
+                  style: context.text.bodySmall
+                      ?.copyWith(color: c.onSurfaceVariant),
+                ),
+              ]),
+              const SizedBox(height: 8),
+              const LinearProgressIndicator(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _CoverFillBanner extends StatelessWidget {
   const _CoverFillBanner({required this.progress});
   final ({int done, int total}) progress;

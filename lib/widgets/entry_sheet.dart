@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../models/entry.dart';
+import '../services/mangadex.dart';
 import '../state/providers.dart';
 import '../theme.dart';
 import '../utils/dates.dart';
@@ -283,6 +284,12 @@ class _EntrySheet extends ConsumerWidget {
           ],
         ),
 
+        // ---- Source (covers + new chapters) ----
+        if (e.type != EntryType.comic) ...[
+          const SectionLabel('New chapters'),
+          _SourceRow(entry: e, run: run),
+        ],
+
         // ---- Read on ----
         const SectionLabel('Where you read it'),
         _ReadOnRow(entry: e, run: run),
@@ -361,6 +368,199 @@ class _ReadOnRow extends StatelessWidget {
         ),
       );
     });
+  }
+}
+
+class _SourceRow extends ConsumerWidget {
+  const _SourceRow({required this.entry, required this.run});
+  final Entry entry;
+  final Future<void> Function(Future<void> Function()) run;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final c = context.colors;
+    final notifier = ref.read(entriesProvider.notifier);
+    Future<void> pick() => run(() async {
+          final m = await showSourcePicker(context, entry.title);
+          if (m == null) return;
+          await notifier.linkSource(entry, m);
+          if (context.mounted) showSnack(context, 'Linked to “${m.title}”');
+        });
+
+    if (!entry.isLinked) {
+      return OutlinedButton.icon(
+        onPressed: pick,
+        icon: const Icon(Icons.travel_explore_rounded),
+        label: Text(entry.sourceId == noSourceFound
+            ? 'No match found — pick the series'
+            : 'Find series (cover + new chapters)'),
+      );
+    }
+
+    final latest = entry.latestChapter;
+    final checked = entry.latestCheckedAt;
+    final unread = entry.unreadChapters;
+    return Card(
+      child: ListTile(
+        leading: Icon(
+          unread > 0 ? Icons.fiber_new_rounded : Icons.notifications_active_outlined,
+          color: unread > 0 ? c.tertiary : c.primary,
+        ),
+        title: Text(latest == null
+            ? 'MangaDex · no English chapters yet'
+            : unread > 0
+                ? 'Chapter $latest is out · $unread new'
+                : 'Up to date · latest is Ch $latest'),
+        subtitle: Text(checked == null
+            ? 'Checked every 5 hours'
+            : 'Checked ${relativeTime(checked)} · every 5 hours'),
+        trailing: PopupMenuButton<String>(
+          onSelected: (v) => switch (v) {
+            'refresh' => run(() => notifier.refreshLatest(entry)),
+            'change' => pick(),
+            _ => run(() => notifier.unlinkSource(entry)),
+          },
+          itemBuilder: (_) => const [
+            PopupMenuItem(value: 'refresh', child: Text('Check now')),
+            PopupMenuItem(value: 'change', child: Text('Change series / cover')),
+            PopupMenuItem(value: 'unlink', child: Text('Stop checking')),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Lets the reader pick the right series on MangaDex (with covers, so the
+/// correct one is easy to spot). Returns null if cancelled.
+Future<SourceManga?> showSourcePicker(BuildContext context, String title) {
+  return showModalBottomSheet<SourceManga>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    builder: (_) => DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.85,
+      maxChildSize: 0.95,
+      builder: (context, controller) =>
+          _SourcePicker(initial: title, controller: controller),
+    ),
+  );
+}
+
+class _SourcePicker extends ConsumerStatefulWidget {
+  const _SourcePicker({required this.initial, required this.controller});
+  final String initial;
+  final ScrollController controller;
+
+  @override
+  ConsumerState<_SourcePicker> createState() => _SourcePickerState();
+}
+
+class _SourcePickerState extends ConsumerState<_SourcePicker> {
+  late final _query = TextEditingController(text: widget.initial);
+  Future<List<SourceManga>>? _results;
+
+  @override
+  void initState() {
+    super.initState();
+    _search();
+  }
+
+  @override
+  void dispose() {
+    _query.dispose();
+    super.dispose();
+  }
+
+  void _search() => setState(() {
+        _results = ref.read(mangaDexProvider).search(_query.text, limit: 20);
+      });
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+          child: TextField(
+            controller: _query,
+            textInputAction: TextInputAction.search,
+            onSubmitted: (_) => _search(),
+            decoration: InputDecoration(
+              hintText: 'Search MangaDex',
+              prefixIcon: const Icon(Icons.search_rounded),
+              suffixIcon: IconButton(
+                icon: const Icon(Icons.arrow_forward_rounded),
+                onPressed: _search,
+              ),
+            ),
+          ),
+        ),
+        Expanded(
+          child: FutureBuilder<List<SourceManga>>(
+            future: _results,
+            builder: (context, snap) {
+              if (snap.connectionState != ConnectionState.done) {
+                return const Center(child: CircularProgressIndicator());
+              }
+              if (snap.hasError) {
+                return Center(child: Text(friendlyError(snap.error!)));
+              }
+              final list = snap.data ?? const [];
+              if (list.isEmpty) {
+                return const Center(child: Text('No series found. Try another name.'));
+              }
+              return ListView.builder(
+                controller: widget.controller,
+                padding: const EdgeInsets.fromLTRB(12, 0, 12, 24),
+                itemCount: list.length,
+                itemBuilder: (context, i) {
+                  final m = list[i];
+                  return Card(
+                    clipBehavior: Clip.antiAlias,
+                    child: InkWell(
+                      onTap: () => Navigator.of(context).pop(m),
+                      child: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Row(
+                          children: [
+                            CoverImage(
+                                url: m.coverUrl, title: m.title, width: 56, height: 80),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(m.title,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: context.text.titleSmall),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    [
+                                      if (m.status != null) m.status!,
+                                      if (m.year != null) '${m.year}',
+                                    ].join(' · '),
+                                    style: context.text.labelSmall
+                                        ?.copyWith(color: c.onSurfaceVariant),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              );
+            },
+          ),
+        ),
+      ],
+    );
   }
 }
 

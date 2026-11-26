@@ -31,6 +31,9 @@ create table if not exists public.entries (
   total_chapters integer,
   read_on_url    text,
   last_read_at   timestamptz,
+  source_id         text,         -- e.g. mangadex:<uuid>, or 'none'
+  latest_chapter    integer,      -- newest chapter the source has
+  latest_checked_at timestamptz,
   created_at     timestamptz not null default now()
 );
 create index if not exists entries_user_position_idx on public.entries (user_id, position);

@@ -9,7 +9,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/entry.dart';
 import '../services/anilist.dart';
+import '../services/background.dart';
 import '../services/entries_repository.dart';
+import '../services/mangadex.dart';
+import '../services/update_checker.dart';
 import '../utils/import_merge.dart';
 
 // ---------------------------------------------------------------------------
@@ -20,6 +23,11 @@ final supabaseProvider =
     Provider<SupabaseClient>((ref) => Supabase.instance.client);
 
 final aniListProvider = Provider<AniListService>((ref) => AniListService());
+
+final mangaDexProvider = Provider<MangaDexService>((ref) => MangaDexService());
+
+/// True while a new-chapter check is running in the app.
+final updateCheckingProvider = StateProvider<bool>((ref) => false);
 
 final authStateProvider = StreamProvider<AuthState>(
     (ref) => ref.watch(supabaseProvider).auth.onAuthStateChange);
@@ -286,8 +294,10 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
   }
 
   /// Pushes pending changes, pulls the latest list from the server, then
-  /// looks up covers for any titles that don't have one yet.
-  Future<void> refresh() async {
+  /// looks up covers for any titles that don't have one yet and checks for
+  /// new chapters. Both run in the background after the list is shown;
+  /// [manual] (pull-to-refresh) checks chapters now instead of every 5 hours.
+  Future<void> refresh({bool manual = false}) async {
     final repo = ref.read(repositoryProvider);
     if (repo == null) return;
     await sync();
@@ -308,7 +318,112 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
         if (!state.hasValue) state = AsyncError(e, StackTrace.current);
       }
     }
-    if (ref.read(onlineProvider)) unawaited(fillMissingCovers());
+    if (ref.read(onlineProvider)) {
+      unawaited(fillMissingCovers());
+      unawaited(checkUpdates(force: manual));
+    }
+  }
+
+  // ---- new chapters ----
+
+  bool _checking = false;
+
+  /// Checks titles you're reading for new chapters — at most every 5 hours
+  /// unless [force] is set. The background job does the same while the app
+  /// is closed; whichever runs first resets the 5-hour clock.
+  Future<void> checkUpdates({bool force = false}) async {
+    final uid = ref.read(userIdProvider);
+    if (uid == null || _checking) return;
+    final checker = UpdateChecker(ref.read(supabaseProvider), uid,
+        source: ref.read(mangaDexProvider));
+    if (!force && !await checker.isDue()) return;
+    _checking = true;
+    ref.read(updateCheckingProvider.notifier).state = true;
+    try {
+      final updates = await checker.run();
+      await Notifications.showUpdates(updates);
+      await _pullSourceFields();
+    } catch (_) {
+      // Offline or the server refused — the next check will try again.
+    } finally {
+      _checking = false;
+      ref.read(updateCheckingProvider.notifier).state = false;
+    }
+  }
+
+  /// Copies what the update check saved on the server (links, newest
+  /// chapter, covers it filled in) into the local list, without touching
+  /// edits that haven't synced yet.
+  Future<void> _pullSourceFields() async {
+    final repo = ref.read(repositoryProvider);
+    if (repo == null) return;
+    final fresh = {for (final e in await repo.fetchAll()) e.id: e};
+    _set([
+      for (final e in _current)
+        if (fresh[e.id] case final f?)
+          e.copyWith(
+            sourceId: Nullable(f.sourceId),
+            latestChapter: Nullable(f.latestChapter),
+            latestCheckedAt: Nullable(f.latestCheckedAt),
+            coverUrl: (e.coverUrl == null || e.coverUrl!.trim().isEmpty)
+                ? Nullable(f.coverUrl)
+                : null,
+          )
+        else
+          e,
+    ]);
+  }
+
+  /// Links [e] to a series picked by hand. Uses its cover (the accurate one
+  /// from the source) unless [keepCover] is set, and reads its newest chapter.
+  Future<void> linkSource(Entry e, SourceManga m, {bool keepCover = false}) async {
+    int? latest;
+    try {
+      latest = await ref.read(mangaDexProvider).latestChapter(m.id);
+    } catch (_) {}
+    final now = DateTime.now();
+    final patch = <String, dynamic>{
+      'source_id': m.sourceId,
+      'latest_chapter': latest,
+      'latest_checked_at': now.toUtc().toIso8601String(),
+      if (!keepCover && m.coverUrl != null) 'cover_url': m.coverUrl,
+    };
+    await save(
+      e,
+      e.copyWith(
+        sourceId: Nullable(m.sourceId),
+        latestChapter: Nullable(latest),
+        latestCheckedAt: Nullable(now),
+        coverUrl: (!keepCover && m.coverUrl != null) ? Nullable(m.coverUrl) : null,
+      ),
+      patch,
+    );
+  }
+
+  /// Stops checking [e] (and stops the background job linking it again).
+  Future<void> unlinkSource(Entry e) => save(
+        e,
+        e.copyWith(
+          sourceId: const Nullable(noSourceFound),
+          latestChapter: const Nullable(null),
+        ),
+        {'source_id': noSourceFound, 'latest_chapter': null},
+      );
+
+  /// Re-reads the newest chapter of one linked title right now.
+  Future<void> refreshLatest(Entry e) async {
+    final id = MangaDexService.idFrom(e.sourceId);
+    if (id == null) return;
+    final latest = await ref.read(mangaDexProvider).latestChapter(id);
+    final now = DateTime.now();
+    await save(
+      e,
+      e.copyWith(latestChapter: Nullable(latest), latestCheckedAt: Nullable(now)),
+      {
+        'latest_chapter': latest,
+        'latest_checked_at': now.toUtc().toIso8601String(),
+      },
+    );
   }
 
   void clearSyncError() => ref.read(syncErrorProvider.notifier).state = null;
@@ -455,6 +570,9 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
       totalChapters: e.totalChapters,
       readOnUrl: e.readOnUrl,
       lastReadAt: e.lastReadAt,
+      sourceId: e.sourceId,
+      latestChapter: e.latestChapter,
+      latestCheckedAt: e.latestCheckedAt,
     );
     final list = [..._current, restored]
       ..sort((a, b) => a.position.compareTo(b.position));
@@ -466,6 +584,10 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
         'row': {
           ..._rowFor(restored),
           'last_read_at': restored.lastReadAt?.toUtc().toIso8601String(),
+          'source_id': restored.sourceId,
+          'latest_chapter': restored.latestChapter,
+          'latest_checked_at':
+              restored.latestCheckedAt?.toUtc().toIso8601String(),
         }
       }
     ]);
@@ -611,7 +733,14 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
           } catch (_) {
             return; // offline — try again next refresh
           }
-          final cover = match?.coverUrl;
+          var cover = match?.coverUrl;
+          if (cover == null || cover.isEmpty) {
+            // Not on AniList (or no cover there): try MangaDex.
+            try {
+              cover = (await ref.read(mangaDexProvider).findExact(e.title))
+                  ?.coverUrl;
+            } catch (_) {}
+          }
           // Look it up again in case it changed during the request.
           final now = _current.where((x) => x.id == e.id).firstOrNull;
           if (cover == null || cover.isEmpty) {
@@ -810,6 +939,7 @@ String friendlyError(Object e) {
   if (e is PostgrestException) return e.message;
   if (e is DataException) return e.message;
   if (e is AniListException) return e.message;
+  if (e is MangaDexException) return e.message;
   final s = e.toString();
   if (s.contains('SocketException') ||
       s.contains('ClientException') ||

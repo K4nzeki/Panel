@@ -125,3 +125,19 @@ lib/
   widgets/                   cards, sheets, charts, shared bits
 test/                        parser, model and widget tests
 ```
+
+## New chapters (1.8)
+
+Titles you're **Reading** are linked to MangaDex (exact title match, or pick
+the series yourself in a title's sheet → *New chapters*). Linking also gives
+the accurate cover. Every 5 hours, only when the phone is online, Panel checks
+the newest English chapter and:
+
+- shows a **+N** badge on the card when you're behind
+- sends a notification when a new chapter comes out
+
+Runs in the background on Android (WorkManager — Android may delay it a little
+to save battery) and also when the app is opened if 5 hours have passed.
+
+**Before installing 1.8, run `supabase_migration_v1.8.sql` in the Supabase SQL
+Editor**, otherwise the list won't load.

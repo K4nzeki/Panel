@@ -17,7 +17,7 @@ String chapterLabel(Entry e) {
 }
 
 /// List row: cover, title, status, progress, and a big "+1" button.
-/// Swipe right → +1 chapter. Swipe left → delete (with Undo).
+/// Swipe left → delete, after a confirmation (with Undo).
 class EntryTile extends ConsumerWidget {
   const EntryTile({super.key, required this.entry, this.dragHandle});
 
@@ -31,24 +31,20 @@ class EntryTile extends ConsumerWidget {
 
     return Dismissible(
       key: ValueKey('dismiss-${entry.id}'),
+      direction: DismissDirection.endToStart, // swipe left only
       background: _SwipeBg(
-        color: c.primary,
-        icon: Icons.add_rounded,
-        label: '+1 chapter',
-        alignLeft: true,
-      ),
-      secondaryBackground: _SwipeBg(
         color: c.error,
         icon: Icons.delete_outline_rounded,
         label: 'Delete',
         alignLeft: false,
       ),
-      confirmDismiss: (dir) async {
-        if (dir == DismissDirection.startToEnd) {
-          await _bump(context, ref, 1);
-          return false; // keep the row; it just updates
-        }
-        return true;
+      confirmDismiss: (_) async {
+        final ok = await confirm(context,
+            title: 'Delete “${entry.title}”?',
+            message: 'It will be removed from your list. You can undo right after.',
+            action: 'Delete',
+            destructive: true);
+        return ok == true; // cancelled → the row slides back
       },
       onDismissed: (_) => deleteWithUndo(context, ref, entry),
       child: Card(
@@ -82,6 +78,8 @@ class EntryTile extends ConsumerWidget {
                         runSpacing: 4,
                         crossAxisAlignment: WrapCrossAlignment.center,
                         children: [
+                          if (entry.hasNewChapters)
+                            NewChaptersBadge(entry.unreadChapters),
                           StatusBadge(entry.status, dense: true),
                           TagChip(entry.type.label),
                           if (entry.reread > 0)
@@ -259,6 +257,12 @@ class EntryGridCard extends ConsumerWidget {
                 ),
               ),
             ),
+            if (entry.hasNewChapters)
+              Positioned(
+                top: 8,
+                right: 8,
+                child: NewChaptersBadge(entry.unreadChapters),
+              ),
             Positioned(
               left: 10,
               right: 10,
@@ -284,6 +288,41 @@ class EntryGridCard extends ConsumerWidget {
                     ThinProgress(value: entry.progress, color: statusColor),
                   ],
                 ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// "+3 new" pill for series with chapters out that you haven't read.
+class NewChaptersBadge extends StatelessWidget {
+  const NewChaptersBadge(this.count, {super.key});
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.colors;
+    return Tooltip(
+      message: '$count new chapter${count == 1 ? '' : 's'} out',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: c.tertiary,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.fiber_new_rounded, size: 14, color: c.onTertiary),
+            const SizedBox(width: 3),
+            Text(
+              count > 99 ? '99+' : '+$count',
+              style: context.text.labelSmall?.copyWith(
+                color: c.onTertiary,
+                fontWeight: FontWeight.w800,
               ),
             ),
           ],

@@ -12,7 +12,9 @@ class AppConfig {
   static const supabaseKey = String.fromEnvironment('SUPABASE_KEY');
 
   static bool get isConfigured =>
-      supabaseUrl.isNotEmpty && supabaseKey.isNotEmpty;
+      supabaseUrl.isNotEmpty &&
+      supabaseKey.isNotEmpty &&
+      !supabaseKey.contains('your_key_here'); // still the env.example.json placeholder
 
   /// Deep link the auth emails (confirm sign-up, reset password) send the
   /// user back to. Must also be added to Supabase → Authentication →

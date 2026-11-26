@@ -7,6 +7,10 @@ if not exist env.json (
   echo env.json is missing. Copy env.example.json to env.json and fill it in.
   exit /b 1
 )
+findstr /c:"your_key_here" env.json >nul && (
+  echo env.json still has the placeholder key. Paste your real publishable key ^(Supabase -^> Project Settings -^> API Keys^).
+  exit /b 1
+)
 
 echo === flutter clean ===
 call flutter clean || goto :fail

@@ -56,7 +56,13 @@ enum EntryStatus {
 /// Columns fetched for an entry — kept in one place so every query agrees.
 const entryColumns =
     'id, title, type, chapter, status, reread, created_at, cover_url, author, '
-    'total_chapters, read_on_url, last_read_at, position';
+    'total_chapters, read_on_url, last_read_at, position, source_id, '
+    'latest_chapter, latest_checked_at';
+
+/// [Entry.sourceId] value for "looked for it on the sources, found nothing".
+/// Stops the background check from searching again every time; linking a
+/// source by hand replaces it.
+const noSourceFound = 'none';
 
 class Entry {
   const Entry({
@@ -73,6 +79,9 @@ class Entry {
     this.totalChapters,
     this.readOnUrl,
     this.lastReadAt,
+    this.sourceId,
+    this.latestChapter,
+    this.latestCheckedAt,
   });
 
   final String id;
@@ -88,6 +97,27 @@ class Entry {
   final int? totalChapters;
   final String? readOnUrl;
   final DateTime? lastReadAt;
+
+  /// Where new chapters are checked, e.g. `mangadex:<uuid>`. Null = not
+  /// linked yet, [noSourceFound] = searched but no match.
+  final String? sourceId;
+
+  /// Newest chapter number the source has (from the update check).
+  final int? latestChapter;
+  final DateTime? latestCheckedAt;
+
+  bool get isLinked => sourceId != null && sourceId != noSourceFound;
+
+  /// Chapters out that you haven't read yet (0 when unknown).
+  int get unreadChapters {
+    final latest = latestChapter;
+    if (latest == null || latest <= chapter) return 0;
+    return latest - chapter;
+  }
+
+  /// Shows the "New" badge: something you're reading has chapters waiting.
+  bool get hasNewChapters =>
+      status == EntryStatus.reading && unreadChapters > 0;
 
   /// 0..1 progress, or null when the total chapter count is unknown.
   double? get progress {
@@ -114,6 +144,9 @@ class Entry {
         totalChapters: _toInt(j['total_chapters']),
         readOnUrl: j['read_on_url'] as String?,
         lastReadAt: _toDate(j['last_read_at']),
+        sourceId: j['source_id'] as String?,
+        latestChapter: _toInt(j['latest_chapter']),
+        latestCheckedAt: _toDate(j['latest_checked_at']),
       );
 
   Map<String, dynamic> toJson() => {
@@ -130,6 +163,9 @@ class Entry {
         'total_chapters': totalChapters,
         'read_on_url': readOnUrl,
         'last_read_at': lastReadAt?.toIso8601String(),
+        'source_id': sourceId,
+        'latest_chapter': latestChapter,
+        'latest_checked_at': latestCheckedAt?.toIso8601String(),
       };
 
   Entry copyWith({
@@ -145,6 +181,9 @@ class Entry {
     Nullable<String>? author,
     Nullable<int>? totalChapters,
     Nullable<String>? readOnUrl,
+    Nullable<String>? sourceId,
+    Nullable<int>? latestChapter,
+    Nullable<DateTime>? latestCheckedAt,
   }) =>
       Entry(
         id: id,
@@ -161,6 +200,12 @@ class Entry {
         totalChapters:
             totalChapters != null ? totalChapters.value : this.totalChapters,
         readOnUrl: readOnUrl != null ? readOnUrl.value : this.readOnUrl,
+        sourceId: sourceId != null ? sourceId.value : this.sourceId,
+        latestChapter:
+            latestChapter != null ? latestChapter.value : this.latestChapter,
+        latestCheckedAt: latestCheckedAt != null
+            ? latestCheckedAt.value
+            : this.latestCheckedAt,
       );
 }
 

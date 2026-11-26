@@ -1,7 +1,7 @@
 name: panel
 description: Panel — track the manga, manhwa, manhua and comics you read.
 publish_to: "none"
-version: 1.7.0+7
+version: 1.8.0+8
 
 environment:
   sdk: ">=3.7.0 <4.0.0"
@@ -20,6 +20,10 @@ dependencies:
   local_auth: ^3.0.0
   file_picker: ^10.3.3
   archive: ^4.0.4
+  # New-chapter checks in the background + notifications.
+  workmanager: ^0.10.3
+  # Pinned below 20: newer versions need compileSdk 37 / AGP 9.1.
+  flutter_local_notifications: ^19.4.2
 
 dev_dependencies:
   flutter_test:

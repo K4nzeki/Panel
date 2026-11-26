@@ -5,6 +5,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'app.dart';
 import 'config.dart';
+import 'services/background.dart';
 import 'state/app_lock.dart';
 
 Future<void> main() async {
@@ -20,6 +21,14 @@ Future<void> main() async {
     publishableKey: AppConfig.supabaseKey,
   );
   final prefs = await SharedPreferences.getInstance();
+  // New-chapter checks every 5 hours while the app is closed (Android).
+  // A failure here must never stop the app from opening.
+  try {
+    await Background.init();
+  } catch (_) {}
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    Background.requestPermission().catchError((_) {});
+  });
   runApp(ProviderScope(
     overrides: [sharedPrefsProvider.overrideWithValue(prefs)],
     child: const MyReadListApp(),
