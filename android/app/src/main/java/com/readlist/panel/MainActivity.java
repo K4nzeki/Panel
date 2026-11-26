@@ -1,7 +1,9 @@
 package com.readlist.panel;
 
 import android.content.Intent;
+import android.content.pm.FeatureInfo;
 import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.net.Uri;
 import android.os.Build;
 import android.provider.Settings;
@@ -10,6 +12,10 @@ import androidx.annotation.NonNull;
 import androidx.core.content.FileProvider;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import io.flutter.embedding.android.FlutterFragmentActivity;
 import io.flutter.embedding.engine.FlutterEngine;
@@ -37,6 +43,25 @@ public class MainActivity extends FlutterFragmentActivity {
                                 //noinspection ResultOfMethodCallIgnored
                                 dir.mkdirs();
                                 result.success(dir.getAbsolutePath());
+                                break;
+                            }
+                            case "extensionDir": {
+                                File dir = new File(getCacheDir(), "extensions");
+                                //noinspection ResultOfMethodCallIgnored
+                                dir.mkdirs();
+                                result.success(dir.getAbsolutePath());
+                                break;
+                            }
+                            case "installedExtensions": {
+                                result.success(installedExtensions());
+                                break;
+                            }
+                            case "uninstallPackage": {
+                                String pkg = call.argument("package");
+                                startActivity(new Intent(Intent.ACTION_DELETE,
+                                        Uri.parse("package:" + pkg))
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                                result.success(null);
                                 break;
                             }
                             case "canInstall": {
@@ -73,5 +98,32 @@ public class MainActivity extends FlutterFragmentActivity {
                         result.error("updater", e.getMessage(), null);
                     }
                 });
+    }
+
+    /** Installed Mihon / Tachiyomi extensions: they declare the
+     *  "tachiyomi.extension" feature in their manifest. */
+    @SuppressWarnings("deprecation")
+    private List<Map<String, Object>> installedExtensions() {
+        List<Map<String, Object>> out = new ArrayList<>();
+        PackageManager pm = getPackageManager();
+        for (PackageInfo info : pm.getInstalledPackages(PackageManager.GET_CONFIGURATIONS)) {
+            boolean isExtension = false;
+            if (info.reqFeatures != null) {
+                for (FeatureInfo f : info.reqFeatures) {
+                    if ("tachiyomi.extension".equals(f.name)) {
+                        isExtension = true;
+                        break;
+                    }
+                }
+            }
+            if (!isExtension) continue;
+            Map<String, Object> m = new HashMap<>();
+            m.put("package", info.packageName);
+            m.put("versionName", info.versionName == null ? "" : info.versionName);
+            m.put("versionCode", Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
+                    ? info.getLongVersionCode() : (long) info.versionCode);
+            out.add(m);
+        }
+        return out;
     }
 }

@@ -12,7 +12,6 @@ fi
 flutter clean
 flutter pub get
 flutter upgrade
-flutter upgrade --major
 flutter analyze
 flutter test
 flutter build apk --release --dart-define-from-file=env.json

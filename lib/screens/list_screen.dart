@@ -42,8 +42,6 @@ class _ListScreenState extends ConsumerState<ListScreen> {
     final syncError = ref.watch(syncErrorProvider);
     final online = ref.watch(onlineProvider);
     final pending = ref.watch(pendingCountProvider);
-    final coverFill = ref.watch(coverFillProvider);
-    final checking = ref.watch(updateCheckingProvider);
 
     final totalInTab = _isLibrary
         ? counts.entries
@@ -68,13 +66,10 @@ class _ListScreenState extends ConsumerState<ListScreen> {
             _Header(tab: widget.tab, query: query, total: totalInTab),
             if (syncError != null)
               SliverToBoxAdapter(child: _SyncBanner(message: syncError)),
-            if (!online || pending > 0)
-              SliverToBoxAdapter(
-                  child: _OfflineBanner(online: online, pending: pending)),
-            if (coverFill != null && coverFill.total > 0)
-              SliverToBoxAdapter(child: _CoverFillBanner(progress: coverFill)),
-            if (checking && _isLibrary)
-              const SliverToBoxAdapter(child: _CheckingBanner()),
+            // Syncing, checking chapters and finding covers show as quiet
+            // notifications instead of banners; only "offline" shows here.
+            if (!online)
+              SliverToBoxAdapter(child: _OfflineBanner(pending: pending)),
             if (_isLibrary && totalInTab > 0)
               const SliverToBoxAdapter(child: _SummaryStrip()),
             if (totalInTab > 0) ...[
@@ -509,24 +504,16 @@ class _SyncBanner extends ConsumerWidget {
 }
 
 class _OfflineBanner extends ConsumerWidget {
-  const _OfflineBanner({required this.online, required this.pending});
-  final bool online;
+  const _OfflineBanner({required this.pending});
   final int pending;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.colors;
     final changes = pending == 1 ? '1 change' : '$pending changes';
-    final String text;
-    if (!online && pending > 0) {
-      text = "You're offline. $changes saved on this phone will sync "
-          "when you're back online.";
-    } else if (!online) {
-      text = "You're offline. You can keep updating your list — it will "
-          'sync when you reconnect.';
-    } else {
-      text = 'Syncing $changes…';
-    }
+    final text = pending > 0
+        ? "You're offline. $changes will sync when you're back online."
+        : "You're offline. Changes will sync when you reconnect.";
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       child: Material(
@@ -535,8 +522,7 @@ class _OfflineBanner extends ConsumerWidget {
         child: Padding(
           padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
           child: Row(children: [
-            Icon(online ? Icons.cloud_sync_rounded : Icons.cloud_off_rounded,
-                color: c.onSecondaryContainer),
+            Icon(Icons.cloud_off_rounded, color: c.onSecondaryContainer),
             const SizedBox(width: 10),
             Expanded(
               child: Text(text,
@@ -548,82 +534,6 @@ class _OfflineBanner extends ConsumerWidget {
               child: const Text('Retry'),
             ),
           ]),
-        ),
-      ),
-    );
-  }
-}
-
-/// Shown while covers for titles without a photo are being looked up.
-/// Shown while new chapters are being checked (the list stays usable).
-class _CheckingBanner extends StatelessWidget {
-  const _CheckingBanner();
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.colors;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Material(
-        color: c.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(14),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(children: [
-                Icon(Icons.update_rounded, size: 18, color: c.onSurfaceVariant),
-                const SizedBox(width: 10),
-                Text(
-                  'Checking for new chapters…',
-                  style: context.text.bodySmall
-                      ?.copyWith(color: c.onSurfaceVariant),
-                ),
-              ]),
-              const SizedBox(height: 8),
-              const LinearProgressIndicator(),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _CoverFillBanner extends StatelessWidget {
-  const _CoverFillBanner({required this.progress});
-  final ({int done, int total}) progress;
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.colors;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Material(
-        color: c.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(14),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(children: [
-                Icon(Icons.image_search_rounded,
-                    size: 18, color: c.onSurfaceVariant),
-                const SizedBox(width: 10),
-                Text(
-                  'Finding covers ${progress.done} of ${progress.total}…',
-                  style: context.text.bodySmall
-                      ?.copyWith(color: c.onSurfaceVariant),
-                ),
-              ]),
-              const SizedBox(height: 8),
-              LinearProgressIndicator(
-                value: progress.done / progress.total,
-              ),
-            ],
-          ),
         ),
       ),
     );

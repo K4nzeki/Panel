@@ -2,4 +2,6 @@
 <!-- Where downloaded app updates are kept (see MainActivity "installApk"). -->
 <paths>
     <cache-path name="updates" path="updates/" />
+    <!-- Extension APKs downloaded from the extension store. -->
+    <cache-path name="extensions" path="extensions/" />
 </paths>

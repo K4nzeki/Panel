@@ -4,7 +4,7 @@ A Flutter rebuild of the MyReadList web app: track the manga, manhwa, manhua
 and comics you read. It uses the **same Supabase project and database** as the
 web version, so existing accounts and lists work right away.
 
-## Build it
+## Test
 
 ```bash
 # 1. Generate the Android / iOS / web platform folders (keeps lib/ and test/)
@@ -12,7 +12,6 @@ flutter clean
 flutter pub get
 flutter analyze
 flutter test
-flutter build apk --release --dart-define-from-file=env.json
 ```
 
 Needs Flutter 3.29 or newer (`flutter --version`).
@@ -141,3 +140,25 @@ to save battery) and also when the app is opened if 5 hours have passed.
 
 **Before installing 1.8, run `supabase_migration_v1.8.sql` in the Supabase SQL
 Editor**, otherwise the list won't load.
+
+## Updates tab and extension store (1.9)
+
+- **Less clutter:** checking for new chapters, finding covers and slow syncs
+  no longer show banners in the list. They show as a quiet notification with
+  a progress bar (no sound) and disappear when done. Only "You're offline"
+  still shows in the list.
+- **Updates tab:** every new-chapter alert is saved here (one per series,
+  newest first). Tap one — or the notification itself — to open that series.
+  Swipe to remove, *Mark all as read*, pull down to check now. The tab shows
+  a badge with the unread count.
+- **Extension store** (Profile → Extensions): paste a repo link such as
+  `https://github.com/keiyoushi/extensions/raw/repo/index.pb`, then browse,
+  install, update or uninstall Mihon / Tachiyomi extensions (Android installs
+  them as separate apps, like Mihon does).
+- **Covers from extensions:** when AniList and MangaDex have no cover, Panel
+  searches the sites of your installed extensions and uses the cover next to
+  an exact title match. Panel can't run extension code itself, so this works
+  on sites with a normal search page (most WordPress-style manga sites) and
+  skips sites behind Cloudflare checks.
+
+No database changes. Run `flutter pub get` once (adds the `html` package).

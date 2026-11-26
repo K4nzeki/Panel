@@ -11,9 +11,11 @@ import '../models/entry.dart';
 import '../services/anilist.dart';
 import '../services/background.dart';
 import '../services/entries_repository.dart';
+import '../services/extension_covers.dart';
 import '../services/mangadex.dart';
 import '../services/update_checker.dart';
 import '../utils/import_merge.dart';
+import 'inbox.dart';
 
 // ---------------------------------------------------------------------------
 // Core services
@@ -250,6 +252,14 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     final repo = ref.read(repositoryProvider);
     if (repo == null || _outbox.isEmpty) return;
     _syncing = true;
+    // Most syncs take a moment; only show a notification for slow ones.
+    final slow = Timer(const Duration(seconds: 2), () {
+      final n = _outbox.length;
+      if (_syncing && n > 0) {
+        unawaited(Notifications.showProgress(Notifications.syncProgressId,
+            'Syncing $n ${n == 1 ? 'change' : 'changes'}'));
+      }
+    });
     try {
       while (_outbox.isNotEmpty) {
         final op = _outbox.first;
@@ -286,6 +296,8 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
       }
     } finally {
       _syncing = false;
+      slow.cancel();
+      unawaited(Notifications.endProgress(Notifications.syncProgressId));
       if (_syncAgain) {
         _syncAgain = false;
         unawaited(sync());
@@ -340,14 +352,21 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     _checking = true;
     ref.read(updateCheckingProvider.notifier).state = true;
     try {
-      final updates = await checker.run();
-      await Notifications.showUpdates(updates);
+      // Progress shows as a quiet notification, not a banner in the list.
+      final updates = await checker.run(
+        onProgress: (done, total) => Notifications.showProgress(
+            Notifications.chaptersProgressId, 'Checking for new chapters',
+            done: done, total: total),
+      );
+      await Notifications.showUpdates(uid, updates);
+      if (updates.isNotEmpty) await ref.read(inboxProvider.notifier).reload();
       await _pullSourceFields();
     } catch (_) {
       // Offline or the server refused — the next check will try again.
     } finally {
       _checking = false;
       ref.read(updateCheckingProvider.notifier).state = false;
+      await Notifications.endProgress(Notifications.chaptersProgressId);
     }
   }
 
@@ -691,25 +710,52 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
   /// so every refresh doesn't search for them again.
   final Set<String> _noCoverFound = {};
 
-  /// Looks up covers (plus author / chapter count if missing) on AniList
-  /// for titles that don't have a cover yet. Runs one title at a time in
-  /// the background, saves each as it's found, and stops quietly when
-  /// offline. Comics are skipped (AniList barely has any).
+  /// Signature of the extension sites the last cover search used.
+  String? _extSignature;
+
+  /// Looks up covers (plus author / chapter count if missing) on AniList,
+  /// then MangaDex, then the sites of installed extensions, for titles that
+  /// don't have a cover yet. Runs one title at a time in the background,
+  /// saves each as it's found, and stops quietly when offline. Progress
+  /// shows as a quiet notification. Comics only go to the extensions
+  /// (AniList barely has any).
   Future<void> fillMissingCovers() async {
     if (_filling) {
       _fillAgain = true;
       return;
     }
+    _filling = true;
+    final ExtensionCoverFinder ext;
+    try {
+      ext = await ExtensionCoverFinder.load();
+    } catch (_) {
+      _filling = false;
+      return;
+    }
+    if (_extSignature != ext.signature) {
+      // Extensions changed: titles not found before may be found now.
+      _extSignature = ext.signature;
+      _noCoverFound.clear();
+    }
     bool needsCover(Entry e) =>
         (e.coverUrl == null || e.coverUrl!.trim().isEmpty) &&
-        e.type != EntryType.comic &&
+        (e.type != EntryType.comic || ext.isNotEmpty) &&
         !_noCoverFound.contains(titleKey(e.title));
 
     final todo = _current.where(needsCover).map((e) => e.id).toList();
-    if (todo.isEmpty) return;
-    _filling = true;
+    if (todo.isEmpty) {
+      _filling = false;
+      if (_fillAgain) {
+        _fillAgain = false;
+        unawaited(fillMissingCovers());
+      }
+      return;
+    }
     final progress = ref.read(coverFillProvider.notifier);
     progress.state = (done: 0, total: todo.length);
+    unawaited(Notifications.showProgress(
+        Notifications.coversProgressId, 'Finding covers',
+        done: 0, total: todo.length));
     final anilist = ref.read(aniListProvider);
     try {
       var busyRetries = 0;
@@ -719,27 +765,34 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
         final e = _current.where((x) => x.id == todo[i]).firstOrNull;
         if (e != null && needsCover(e)) {
           SearchResult? match;
-          try {
-            match = await anilist.lookup(e.title);
-            busyRetries = 0;
-          } on AniListException catch (err) {
-            if (err.rateLimited && busyRetries < 2) {
-              busyRetries++;
-              await Future<void>.delayed(const Duration(seconds: 30));
-              i--; // try this title again
-              continue;
-            }
-            return; // AniList keeps refusing — try again next refresh
-          } catch (_) {
-            return; // offline — try again next refresh
-          }
-          var cover = match?.coverUrl;
-          if (cover == null || cover.isEmpty) {
-            // Not on AniList (or no cover there): try MangaDex.
+          String? cover;
+          if (e.type != EntryType.comic) {
             try {
-              cover = (await ref.read(mangaDexProvider).findExact(e.title))
-                  ?.coverUrl;
-            } catch (_) {}
+              match = await anilist.lookup(e.title);
+              busyRetries = 0;
+            } on AniListException catch (err) {
+              if (err.rateLimited && busyRetries < 2) {
+                busyRetries++;
+                await Future<void>.delayed(const Duration(seconds: 30));
+                i--; // try this title again
+                continue;
+              }
+              return; // AniList keeps refusing — try again next refresh
+            } catch (_) {
+              return; // offline — try again next refresh
+            }
+            cover = match?.coverUrl;
+            if (cover == null || cover.isEmpty) {
+              // Not on AniList (or no cover there): try MangaDex.
+              try {
+                cover = (await ref.read(mangaDexProvider).findExact(e.title))
+                    ?.coverUrl;
+              } catch (_) {}
+            }
+          }
+          if ((cover == null || cover.isEmpty) && ext.isNotEmpty) {
+            // Last try: the sites of the extensions you installed.
+            cover = await ext.find(e.title);
           }
           // Look it up again in case it changed during the request.
           final now = _current.where((x) => x.id == e.id).firstOrNull;
@@ -748,12 +801,12 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
           } else if (now != null && needsCover(now)) {
             final patch = <String, dynamic>{'cover_url': cover};
             var after = now.copyWith(coverUrl: Nullable(cover));
-            if (now.author == null && match!.author != null) {
-              patch['author'] = match.author;
+            if (now.author == null && match?.author != null) {
+              patch['author'] = match!.author;
               after = after.copyWith(author: Nullable(match.author));
             }
-            if (now.totalChapters == null && match!.totalChapters != null) {
-              patch['total_chapters'] = match.totalChapters;
+            if (now.totalChapters == null && match?.totalChapters != null) {
+              patch['total_chapters'] = match!.totalChapters;
               after = after.copyWith(totalChapters: Nullable(match.totalChapters));
             }
             _set([for (final x in _current) x.id == now.id ? after : x]);
@@ -765,10 +818,14 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
           await Future<void>.delayed(const Duration(milliseconds: 700));
         }
         progress.state = (done: i + 1, total: todo.length);
+        unawaited(Notifications.showProgress(
+            Notifications.coversProgressId, 'Finding covers',
+            done: i + 1, total: todo.length));
       }
     } finally {
       _filling = false;
       progress.state = null;
+      unawaited(Notifications.endProgress(Notifications.coversProgressId));
       if (_fillAgain) {
         _fillAgain = false;
         unawaited(fillMissingCovers());

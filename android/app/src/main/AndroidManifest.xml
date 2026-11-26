@@ -1,8 +1,15 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.USE_BIOMETRIC"/>
     <!-- Lets the app open the installer for updates downloaded from GitHub. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <!-- Lets the extension store see which Mihon / Tachiyomi extensions are
+         installed (they're separate apps). -->
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="QueryAllPackagesPermission"/>
+    <!-- Lets the extension store open the uninstall screen. -->
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES"/>
     <!-- "New chapters" notifications (asked for on Android 13+). -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application

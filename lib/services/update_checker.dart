@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../models/entry.dart';
 import 'anilist.dart';
+import 'extension_covers.dart';
 import 'mangadex.dart';
 
 /// A series whose newest chapter went up during a check.
@@ -46,7 +47,9 @@ class UpdateChecker {
   /// read yet (these get a notification).
   ///
   /// Stops early and keeps what it saved if the connection drops.
-  Future<List<SeriesUpdate>> run() async {
+  /// [onProgress] gets (titles done, titles to check) as it goes.
+  Future<List<SeriesUpdate>> run(
+      {void Function(int done, int total)? onProgress}) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(_lastKey, DateTime.now().millisecondsSinceEpoch);
 
@@ -55,11 +58,16 @@ class UpdateChecker {
         .select(entryColumns)
         .eq('user_id', userId)
         .eq('status', EntryStatus.reading.label);
-    final entries = rows.map(Entry.fromJson).toList();
+    final entries = rows
+        .map(Entry.fromJson)
+        .where((e) => e.type != EntryType.comic) // not on MangaDex
+        .toList();
 
     final updates = <SeriesUpdate>[];
+    var done = 0;
+    onProgress?.call(0, entries.length);
     for (var e in entries) {
-      if (e.type == EntryType.comic) continue; // not on MangaDex
+      onProgress?.call(done++, entries.length);
       try {
         if (e.sourceId == null) {
           e = await _link(e);
@@ -113,11 +121,22 @@ class UpdateChecker {
   String get _noCoverKey => 'covers_not_found_v1_$userId';
 
   /// Finds covers for titles that don't have one (AniList first, then
-  /// MangaDex), plus a missing author / chapter count. Titles neither source
-  /// has are remembered so they aren't searched every time. Stops quietly
-  /// when offline. Used by the background job.
-  Future<int> fillCovers(AniListService anilist, {int max = 80}) async {
+  /// MangaDex, then the sites of installed extensions), plus a missing
+  /// author / chapter count. Titles no source has are remembered so they
+  /// aren't searched every time (forgotten when extensions change). Stops
+  /// quietly when offline. Used by the background job.
+  Future<int> fillCovers(AniListService anilist,
+      {int max = 80,
+      ExtensionCoverFinder? extensions,
+      void Function(int done, int total)? onProgress}) async {
     final prefs = await SharedPreferences.getInstance();
+    await prefs.reload();
+    final ext = extensions ?? ExtensionCoverFinder.empty;
+    final sig = 'covers_not_found_sig_v1_$userId';
+    if (prefs.getString(sig) != ext.signature) {
+      await prefs.remove(_noCoverKey);
+      await prefs.setString(sig, ext.signature);
+    }
     final skip = {...?prefs.getStringList(_noCoverKey)};
     final rows = await _db
         .from('entries')
@@ -127,30 +146,40 @@ class UpdateChecker {
     final todo = rows
         .map(Entry.fromJson)
         .where((e) =>
-            e.type != EntryType.comic && !skip.contains(normalizeTitle(e.title)))
+            (e.type != EntryType.comic || ext.isNotEmpty) &&
+            !skip.contains(normalizeTitle(e.title)))
         .take(max)
         .toList();
 
     var found = 0;
+    var done = 0;
     for (final e in todo) {
+      onProgress?.call(done++, todo.length);
       SearchResult? match;
       String? cover;
+      var errored = false;
       try {
-        match = await anilist.lookup(e.title);
-        cover = match?.coverUrl;
-        if (cover == null || cover.isEmpty) {
-          cover = (await _source.findExact(e.title))?.coverUrl;
+        if (e.type != EntryType.comic) {
+          match = await anilist.lookup(e.title);
+          cover = match?.coverUrl;
+          if (cover == null || cover.isEmpty) {
+            cover = (await _source.findExact(e.title))?.coverUrl;
+          }
         }
       } on AniListException catch (err) {
         if (err.rateLimited) break; // try again next run
-        continue;
+        errored = true; // fall through to the extensions
       } on MangaDexException {
-        continue;
+        errored = true;
       } catch (_) {
         break; // offline
       }
+      if ((cover == null || cover.isEmpty) && ext.isNotEmpty) {
+        cover = await ext.find(e.title);
+      }
       if (cover == null || cover.isEmpty) {
-        skip.add(normalizeTitle(e.title));
+        // Only remember "not found" when every source actually answered.
+        if (!errored) skip.add(normalizeTitle(e.title));
       } else {
         await _patch(e.id, {
           'cover_url': cover,

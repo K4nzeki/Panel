@@ -8,6 +8,7 @@ import '../config.dart';
 import '../models/entry.dart';
 import '../services/sheet_file.dart';
 import '../state/app_lock.dart';
+import '../state/extensions.dart';
 import '../state/providers.dart';
 import '../theme.dart';
 import '../utils/import_merge.dart';
@@ -17,6 +18,7 @@ import '../widgets/common.dart';
 import '../widgets/entry_sheet.dart';
 import '../widgets/update_dialog.dart';
 import 'community_screen.dart';
+import 'extension_store_screen.dart';
 
 class ProfileScreen extends ConsumerWidget {
   const ProfileScreen({super.key});
@@ -154,6 +156,25 @@ class ProfileScreen extends ConsumerWidget {
                     onSelectionChanged: (s) =>
                         ref.read(themeModeProvider.notifier).set(s.first),
                   ),
+                ),
+              ),
+
+              // ---- Extensions ----
+              const SectionLabel('Extensions'),
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.extension_outlined),
+                  title: const Text('Extension store'),
+                  subtitle: Text(switch (ref.watch(extensionStoreProvider)) {
+                    final s when s.repoUrls.isEmpty =>
+                      'Add a repo link to download extensions',
+                    final s =>
+                      '${s.extensions.where(s.isInstalled).length} installed · '
+                          '${s.repoUrls.length} repo${s.repoUrls.length == 1 ? '' : 's'}',
+                  }),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                      builder: (_) => const ExtensionStoreScreen())),
                 ),
               ),
 
