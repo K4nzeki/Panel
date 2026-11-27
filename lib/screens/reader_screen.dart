@@ -1,14 +1,20 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 
 import '../models/entry.dart';
 import '../models/reader.dart';
 import '../services/downloads.dart';
+import '../services/page_cache.dart';
+import '../services/page_prefetcher.dart';
 import '../services/sources/reader_source.dart';
 import '../state/downloads.dart';
 import '../state/providers.dart';
@@ -58,6 +64,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   late int _startPage = widget.startPage;
   late double _startOffset = widget.startOffset;
   late final ReadingLinksNotifier _links;
+  late final ReadChaptersNotifier _readChapters;
   AppLifecycleListener? _lifecycle;
 
   /// Layout in use; follows [readingModeProvider] (your pick, or the
@@ -79,6 +86,21 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   /// Set for extension sources: they load their own images.
   ImageFetcher? _fetcher;
+
+  /// Page images of this reading session, downloaded once and shared by the
+  /// page on screen and the background prefetch. Deleted when you leave.
+  final _pageCache = PageCache(dir: _pageCacheDir());
+  final _http = http.Client();
+
+  /// Loads every page of the open chapter in the background.
+  PagePrefetcher? _prefetch;
+
+  /// The previous chapter's page urls, kept in [_pageCache] for going back.
+  List<String> _prevUrls = const [];
+
+  /// Decoded pages ahead of the one you're on (the rest stay encoded, so a
+  /// long chapter doesn't fill memory).
+  static const _decodeAhead = 3;
   String? _error;
   bool _offline = false;
   bool _fromDownload = false;
@@ -106,6 +128,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     super.initState();
     // Kept for dispose(), where ref can't be used any more.
     _links = ref.read(readingLinksProvider.notifier);
+    _readChapters = ref.read(readChaptersProvider.notifier);
     _mode = ref.read(readingModeProvider(widget.entryId));
     // Picked in reader settings (or the library loaded the title's type).
     ref.listenManual(readingModeProvider(widget.entryId),
@@ -133,6 +156,11 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     // Providers can't change while the tree is being torn down: save right
     // after this frame instead.
     _save(later: true);
+    _prefetch?.cancel();
+    _evictDecoded(_pages);
+    // Aborts page downloads still running, then drops the saved pages.
+    _http.close();
+    unawaited(_pageCache.dispose());
     _scroll.dispose();
     _pager?.dispose();
     _focus.dispose();
@@ -142,8 +170,101 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   // ---- Loading ----
 
+  /// A folder of its own for this reading session's pages.
+  static Future<Directory?> _pageCacheDir() async {
+    if (kIsWeb) return null;
+    try {
+      final base = await getTemporaryDirectory();
+      final d = Directory('${base.path}${Platform.pathSeparator}reader_pages'
+          '${Platform.pathSeparator}${DateTime.now().microsecondsSinceEpoch}');
+      await d.create(recursive: true);
+      return d;
+    } catch (_) {
+      return null; // pages are kept in memory instead
+    }
+  }
+
+  /// Downloads one page image from the chapter's source.
+  Future<Uint8List> _loadPageBytes(String url) async {
+    final fetcher = _fetcher;
+    if (fetcher != null) return (await fetcher.fetchImage(url)).bytes;
+    final res = await _http
+        .get(Uri.parse(url), headers: _headers)
+        .timeout(const Duration(seconds: 30));
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw SourceException('Page image failed (${res.statusCode}).');
+    }
+    return res.bodyBytes;
+  }
+
+  /// What [_PageImage] shows for [page], and what the prefetch decodes
+  /// ahead of time: the same provider (and size), so a prefetched page
+  /// comes straight from the image cache.
+  ImageProvider _providerFor(_Page page, int cacheWidth, {int attempt = 0}) {
+    final ImageProvider base = page.file != null
+        ? FileImage(File(page.file!))
+        : CachedPageImage(page.url!, _pageCache, _loadPageBytes,
+            attempt: attempt);
+    return ResizeImage.resizeIfNeeded(cacheWidth, null, base);
+  }
+
+  int _cacheWidth(BuildContext context) => _lastCacheWidth =
+      (MediaQuery.sizeOf(context).width * MediaQuery.devicePixelRatioOf(context))
+          .round();
+
+  /// The decode width last used, to find a chapter's decoded pages again.
+  int _lastCacheWidth = 0;
+
+  /// Frees the decoded images of [pages] (a chapter you left).
+  void _evictDecoded(List<_Page>? pages) {
+    final w = _lastCacheWidth;
+    if (pages == null || w <= 0) return;
+    for (final p in pages) {
+      unawaited(_providerFor(p, w).evict());
+    }
+  }
+
+  /// Starts loading every page of the chapter that just opened, from
+  /// [start] on, in the background. Downloaded chapters are already on the
+  /// phone, so only the pages near you are decoded ([_precacheAround]).
+  void _startPrefetch(List<_Page> pages, int start) {
+    _prefetch?.cancel();
+    final urls = [for (final p in pages) if (p.url != null) p.url!];
+    // Keep this chapter and the one before; drop older pages.
+    _pageCache.retain([...urls, ..._prevUrls]);
+    _prevUrls = urls;
+    if (urls.isEmpty) return;
+    final prefetch = PagePrefetcher(
+      count: pages.length,
+      start: start,
+      load: (i) async {
+        final url = pages[i].url;
+        if (url != null) await _pageCache.get(url, _loadPageBytes);
+      },
+    );
+    _prefetch = prefetch..start();
+  }
+
+  /// Decodes the next few pages (and the one before) so turning or
+  /// scrolling to them shows them at once. Errors are ignored here: the
+  /// page itself shows "Retry" if it really can't load.
+  void _precacheAround(int page) {
+    final pages = _pages;
+    if (pages == null || !mounted) return;
+    final width = _cacheWidth(context);
+    for (final i in [for (var d = 1; d <= _decodeAhead; d++) page + d, page - 1]) {
+      if (i < 0 || i >= pages.length) continue;
+      unawaited(precacheImage(_providerFor(pages[i], width), context,
+          onError: (_, _) {}));
+    }
+  }
+
   Future<void> _load() async {
     final gen = ++_gen;
+    // Leaving this chapter (or retrying it): stop loading its pages.
+    _prefetch?.cancel();
+    _prefetch = null;
+    _evictDecoded(_pages);
     setState(() {
       _pages = null;
       _error = null;
@@ -198,6 +319,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     });
     _save();
     ref.read(entriesProvider.notifier).touch(widget.entryId);
+    // Every page of the chapter starts loading now, from where you opened.
+    _startPrefetch(pages, start);
+    _precacheAround(start);
     if (_mode.paged) {
       // Opening on the last page (or a one-page chapter) is reading it.
       if (start >= pages.length - 1) _markFinished();
@@ -285,6 +409,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   void _endJump(int p) {
     _settling = false;
     if (_page != p) setState(() => _page = p);
+    _precacheAround(p);
     _scheduleSave();
   }
 
@@ -330,17 +455,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     _save();
   }
 
-  /// Reached the end: remember it, and move the library forward.
+  /// Reached the end: remember it, and record the chapter as read (the
+  /// library's chapter count moves forward). Reaching the end again, or
+  /// tapping "Next" after it, records nothing more ([ReadChaptersNotifier]).
   void _markFinished() {
     if (_finished || _pages == null) return;
     _finished = true;
     _save(finished: true);
-    final n = _chapter.number;
-    if (n != null) {
-      unawaited(ref
-          .read(entriesProvider.notifier)
-          .markReadUpTo(widget.entryId, n.floor()));
-    }
+    _readChapters.finish(widget.entryId, _chapter);
   }
 
   /// Runs [fn] now, or right after this frame if Flutter is in the middle
@@ -388,7 +510,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (current != _page || moved || (atEnd && !_finished)) {
       _safely(() {
         _pageOffset = offset;
-        if (current != _page) setState(() => _page = current);
+        if (current != _page) {
+          setState(() => _page = current);
+          _precacheAround(current);
+        }
         if (moved) _scheduleSave();
         if (atEnd) _markFinished();
       });
@@ -403,6 +528,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (pages == null) return;
     final p = i.clamp(0, pages.length - 1);
     if (p != _page || _pageOffset != 0) {
+      if (p != _page) _precacheAround(p);
       setState(() {
         _page = p;
         _pageOffset = 0;
@@ -611,11 +737,13 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       content = const Center(child: CircularProgressIndicator());
     } else if (_mode.paged) {
       final size = MediaQuery.sizeOf(context);
-      final dpr = MediaQuery.devicePixelRatioOf(context);
+      final cacheWidth = _cacheWidth(context);
       content = PageView.builder(
         // A fresh view per chapter / mode (its controller knows the page).
         key: ObjectKey(_pager),
         controller: _pager,
+        // Keeps the page on each side built, so a turn shows it at once.
+        allowImplicitScrolling: true,
         // Manga: the next page comes in from the left.
         reverse: _mode == ReadingMode.pagedRtl,
         itemCount: pages.length + 1,
@@ -625,22 +753,22 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
             return Center(
                 child: SingleChildScrollView(child: _footer(context)));
           }
+          final page = pages[i];
           return Center(
             child: _PageImage(
-              page: pages[i],
-              headers: _headers,
-              fetcher: _fetcher,
+              key: ValueKey(page.file ?? page.url),
+              image: (attempt) =>
+                  _providerFor(page, cacheWidth, attempt: attempt),
               width: size.width,
               height: size.height,
               fit: BoxFit.contain,
-              cacheWidth: (size.width * dpr).round(),
             ),
           );
         },
       );
     } else {
-      final width = MediaQuery.sizeOf(context).width;
-      final dpr = MediaQuery.devicePixelRatioOf(context);
+      final size = MediaQuery.sizeOf(context);
+      final cacheWidth = _cacheWidth(context);
       content = NotificationListener<ScrollNotification>(
         onNotification: _onScroll,
         child: ListView.builder(
@@ -648,17 +776,21 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           key: ValueKey('chapter:${_chapter.key}'),
           controller: _scroll,
           padding: EdgeInsets.zero,
+          // Builds about one screen ahead and behind, no more: pages further
+          // away are disposed (their decoded images can leave memory), and
+          // the next pages are already decoded by _precacheAround.
+          cacheExtent: size.height,
+          addAutomaticKeepAlives: false,
           itemCount: pages.length + 1,
           itemBuilder: (context, i) {
             if (i == pages.length) return _footer(context);
+            final page = pages[i];
             return KeyedSubtree(
               key: _keys[i],
               child: _PageImage(
-                page: pages[i],
-                headers: _headers,
-                fetcher: _fetcher,
-                width: width,
-                cacheWidth: (width * dpr).round(),
+                image: (attempt) =>
+                    _providerFor(page, cacheWidth, attempt: attempt),
+                width: size.width,
               ),
             );
           },
@@ -782,6 +914,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                                         setState(() => _page = v.round()),
                                     onChangeEnd: (v) {
                                       _pageOffset = 0;
+                                      // Load from here on first.
+                                      _prefetch?.focus(v.round());
                                       _jumpTo(v.round());
                                     },
                                   ),
@@ -845,20 +979,16 @@ IconData _modeIcon(ReadingMode m) => switch (m) {
 
 class _PageImage extends StatefulWidget {
   const _PageImage({
-    required this.page,
-    required this.headers,
+    super.key,
+    required this.image,
     required this.width,
-    required this.cacheWidth,
-    this.fetcher,
     this.height,
     this.fit = BoxFit.fitWidth,
   });
 
-  final _Page page;
-  final Map<String, String> headers;
-  final ImageFetcher? fetcher;
+  /// The page's image for a given load [attempt] ("Retry" loads it again).
+  final ImageProvider Function(int attempt) image;
   final double width;
-  final int cacheWidth;
 
   /// Paged modes: the whole page fits in [width] x [height]. Null in the
   /// long strip, where pages are as tall as their width makes them.
@@ -905,41 +1035,12 @@ class _PageImageState extends State<_PageImage> {
           ),
         );
 
-    final p = widget.page;
-    if (p.file != null) {
-      return Image.file(
-        File(p.file!),
-        key: ValueKey('${p.file}#$_attempt'),
-        width: widget.width,
-        height: widget.height,
-        fit: widget.fit,
-        cacheWidth: widget.cacheWidth,
-        gaplessPlayback: true,
-        frameBuilder: frame,
-        errorBuilder: error,
-      );
-    }
-    if (widget.fetcher case final fetcher?) {
-      return Image(
-        image: ResizeImage.resizeIfNeeded(widget.cacheWidth, null,
-            FetchedImageProvider(p.url!, fetcher, attempt: _attempt)),
-        key: ValueKey('${p.url}#$_attempt'),
-        width: widget.width,
-        height: widget.height,
-        fit: widget.fit,
-        gaplessPlayback: true,
-        frameBuilder: frame,
-        errorBuilder: error,
-      );
-    }
-    return Image.network(
-      p.url!,
-      key: ValueKey('${p.url}#$_attempt'),
-      headers: widget.headers,
+    return Image(
+      image: widget.image(_attempt),
+      key: ValueKey(_attempt),
       width: widget.width,
       height: widget.height,
       fit: widget.fit,
-      cacheWidth: widget.cacheWidth,
       gaplessPlayback: true,
       frameBuilder: frame,
       errorBuilder: error,

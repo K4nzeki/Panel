@@ -22,9 +22,13 @@ class HomeShell extends ConsumerStatefulWidget {
 }
 
 class _HomeShellState extends ConsumerState<HomeShell> {
-  int _index = 0;
+  // Tab positions in the bottom bar. Updates comes first; the app still
+  // opens on Library.
+  static const _updatesTab = 0;
+  static const _libraryTab = 1;
+  static const _statsTab = 4;
 
-  static const _updatesTab = 4;
+  int _index = _libraryTab;
   final _openedAt = DateTime.now();
 
   @override
@@ -71,16 +75,16 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   }
 
   static const _pages = <Widget>[
+    UpdatesScreen(),
     ListScreen(tab: ListTab.library),
     ListScreen(tab: ListTab.toRead),
     DiscoverScreen(),
     StatsScreen(),
-    UpdatesScreen(),
     ProfileScreen(),
   ];
 
   void _select(int i) {
-    if (i == 3 && _index != 3) {
+    if (i == _statsTab && _index != _statsTab) {
       // Re-pull chart data whenever Stats is opened.
       ref.invalidate(chaptersPerDayProvider);
       ref.invalidate(completionsPerMonthProvider);
@@ -126,6 +130,19 @@ class _HomeShellState extends ConsumerState<HomeShell> {
         selectedIndex: _index,
         onDestinationSelected: _select,
         destinations: [
+          NavigationDestination(
+            icon: Badge(
+              isLabelVisible: unread > 0,
+              label: Text('$unread'),
+              child: const Icon(Icons.notifications_none_rounded),
+            ),
+            selectedIcon: Badge(
+              isLabelVisible: unread > 0,
+              label: Text('$unread'),
+              child: const Icon(Icons.notifications_rounded),
+            ),
+            label: 'Updates',
+          ),
           const NavigationDestination(
             icon: Icon(Icons.collections_bookmark_outlined),
             selectedIcon: Icon(Icons.collections_bookmark_rounded),
@@ -153,19 +170,6 @@ class _HomeShellState extends ConsumerState<HomeShell> {
             icon: Icon(Icons.insights_outlined),
             selectedIcon: Icon(Icons.insights_rounded),
             label: 'Stats',
-          ),
-          NavigationDestination(
-            icon: Badge(
-              isLabelVisible: unread > 0,
-              label: Text('$unread'),
-              child: const Icon(Icons.notifications_none_rounded),
-            ),
-            selectedIcon: Badge(
-              isLabelVisible: unread > 0,
-              label: Text('$unread'),
-              child: const Icon(Icons.notifications_rounded),
-            ),
-            label: 'Updates',
           ),
           const NavigationDestination(
             icon: Icon(Icons.settings_outlined),

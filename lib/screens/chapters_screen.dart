@@ -190,7 +190,12 @@ class _ChaptersBody extends ConsumerWidget {
     final c = context.colors;
     final list = ref.watch(chaptersProvider(entry.id));
     final notifier = ref.read(chaptersProvider(entry.id).notifier);
-    final downloads = ref.watch(downloadsProvider);
+    // Only what this screen shows: not every download progress tick (each
+    // tile watches its own chapter's download).
+    final waitingForConnection =
+        ref.watch(downloadsProvider.select((s) => s.waitingForConnection));
+    final hasDownloads = ref.watch(downloadsProvider
+        .select((s) => s.forEntry(entry.id).isNotEmpty));
 
     final counts = <String, int>{};
     for (final ch in list.chapters) {
@@ -260,7 +265,7 @@ class _ChaptersBody extends ConsumerWidget {
                     child: Text('Download all (${shown.length})')),
                 PopupMenuItem(
                     value: 'delete',
-                    enabled: downloads.forEntry(entry.id).isNotEmpty,
+                    enabled: hasDownloads,
                     child: const Text('Delete downloads')),
                 const PopupMenuDivider(),
               ],
@@ -324,7 +329,7 @@ class _ChaptersBody extends ConsumerWidget {
                       onPressed: notifier.refresh, child: const Text('Retry')),
                 ),
               ),
-            if (downloads.waitingForConnection)
+            if (waitingForConnection)
               SliverToBoxAdapter(
                 child: _Banner(
                   icon: Icons.download_rounded,
@@ -481,13 +486,28 @@ class _ChapterTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final c = context.colors;
     final n = chapter.number;
-    final read = n != null && n <= entry.chapter;
+    // Read: up to the library's chapter, or finished in the reader (that
+    // also covers chapters without a number).
+    final finished = ref.watch(readChaptersProvider
+        .select((m) => m[entry.id]?.contains(chapter.key) ?? false));
+    final read = (n != null && n <= entry.chapter) || finished;
     final isLast = link.lastChapterKey == chapter.key;
-    final dl = ref.watch(downloadsProvider);
-    final downloaded = dl.find(entry.id, chapter.key) != null;
-    final queued = dl.isQueued(entry.id, chapter.key);
-    final active = dl.activeId == downloadId(entry.id, chapter.key);
-    final failed = dl.failed[downloadId(entry.id, chapter.key)];
+    // Just this chapter's download, so other chapters' progress doesn't
+    // rebuild every tile in the list.
+    final id = downloadId(entry.id, chapter.key);
+    final (:downloaded, :queued, :active, :failed, :progress) =
+        ref.watch(downloadsProvider.select((dl) {
+      final active = dl.activeId == id;
+      return (
+        downloaded: dl.find(entry.id, chapter.key) != null,
+        queued: dl.isQueued(entry.id, chapter.key),
+        active: active,
+        failed: dl.failed[id],
+        progress: active && dl.activeTotal > 0
+            ? dl.activeDone / dl.activeTotal
+            : null,
+      );
+    }));
 
     void open() {
       final order = readingOrder(shown, preferred: chapter.scanlatorLabel);
@@ -516,7 +536,6 @@ class _ChapterTile extends ConsumerWidget {
         },
       );
     } else if (active) {
-      final total = dl.activeTotal;
       trailing = IconButton(
         tooltip: 'Cancel download',
         onPressed: () =>
@@ -526,7 +545,7 @@ class _ChapterTile extends ConsumerWidget {
           height: 22,
           child: CircularProgressIndicator(
             strokeWidth: 2.5,
-            value: total > 0 ? dl.activeDone / total : null,
+            value: progress,
           ),
         ),
       );

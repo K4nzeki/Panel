@@ -31,47 +31,75 @@ class CoverImage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final placeholder = _Placeholder(title: title);
     final u = url?.trim();
     // A cover that failed while offline loads again once you're back.
     final online = ref.watch(onlineProvider);
-    final Widget child;
-    if (u == null || u.isEmpty) {
-      child = placeholder;
-    } else {
-      Widget frame(BuildContext context, Widget child, int? frame, bool sync) {
-        if (sync) return child;
-        return AnimatedSwitcher(
-          duration: const Duration(milliseconds: 250),
-          child: frame == null ? placeholder : child,
-        );
-      }
-
-      final saved = CoverCache.savedSync(u);
-      final ImageProvider remote =
-          CoverCache.supported ? CachedCoverProvider(u) : NetworkImage(u);
-      child = saved != null
-          // Saved: straight from the phone, no network involved.
-          ? Image.file(
-              saved,
-              key: ValueKey('file:$u'),
-              fit: BoxFit.cover,
-              gaplessPlayback: true,
-              errorBuilder: (_, _, _) => placeholder,
-              frameBuilder: frame,
-            )
-          : Image(
-              key: ValueKey('net:$u#$online'),
-              image: remote,
-              fit: BoxFit.cover,
-              gaplessPlayback: true,
-              errorBuilder: (_, _, _) => placeholder,
-              frameBuilder: frame,
-            );
-    }
+    final dpr = MediaQuery.devicePixelRatioOf(context);
     return ClipRRect(
       borderRadius: BorderRadius.circular(radius),
-      child: SizedBox(width: width, height: height, child: child),
+      child: SizedBox(
+        width: width,
+        height: height,
+        child: u == null || u.isEmpty
+            ? _Placeholder(title: title)
+            // Decodes the cover at the size it's drawn, not full size: a
+            // grid of covers then takes a fraction of the memory.
+            : LayoutBuilder(
+                builder: (context, box) => _image(
+                    context,
+                    u,
+                    online,
+                    decodeWidth(width ??
+                            (box.hasBoundedWidth ? box.maxWidth : null),
+                        dpr)),
+              ),
+      ),
+    );
+  }
+
+  /// Pixels to decode a cover drawn [logical] wide at: a little extra for
+  /// covers cropped to fill their box, rounded up to a step of 64 so the
+  /// same cover in similar places shares one decoded image. Null (full
+  /// size) when the width isn't known.
+  static int? decodeWidth(double? logical, double dpr) {
+    if (logical == null || !logical.isFinite || logical <= 0) return null;
+    final px = (logical * dpr * 1.25).ceil();
+    final stepped = ((px + 63) ~/ 64) * 64;
+    return stepped.clamp(64, 1024);
+  }
+
+  Widget _image(BuildContext context, String u, bool online, int? cacheWidth) {
+    final placeholder = _Placeholder(title: title);
+    Widget frame(BuildContext context, Widget child, int? frame, bool sync) {
+      if (sync) return child;
+      return AnimatedSwitcher(
+        duration: const Duration(milliseconds: 250),
+        child: frame == null ? placeholder : child,
+      );
+    }
+
+    final saved = CoverCache.savedSync(u);
+    if (saved != null) {
+      // Saved: straight from the phone, no network involved.
+      return Image.file(
+        saved,
+        key: ValueKey('file:$u'),
+        fit: BoxFit.cover,
+        cacheWidth: cacheWidth,
+        gaplessPlayback: true,
+        errorBuilder: (_, _, _) => placeholder,
+        frameBuilder: frame,
+      );
+    }
+    final ImageProvider remote =
+        CoverCache.supported ? CachedCoverProvider(u) : NetworkImage(u);
+    return Image(
+      key: ValueKey('net:$u#$online'),
+      image: ResizeImage.resizeIfNeeded(cacheWidth, null, remote),
+      fit: BoxFit.cover,
+      gaplessPlayback: true,
+      errorBuilder: (_, _, _) => placeholder,
+      frameBuilder: frame,
     );
   }
 }

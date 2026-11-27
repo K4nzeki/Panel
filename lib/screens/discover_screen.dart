@@ -101,8 +101,7 @@ class _DiscoverScreenState extends ConsumerState<DiscoverScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final entries = ref.watch(entriesProvider).value ?? const <Entry>[];
-    final inList = {for (final e in entries) e.title.trim().toLowerCase()};
+    final inList = ref.watch(libraryTitlesProvider);
     final c = context.colors;
     // MangaDex and your installed extensions, in your reading language.
     final lang = ref.watch(contentLanguageProvider);

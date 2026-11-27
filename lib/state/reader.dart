@@ -274,6 +274,80 @@ final readingLinksProvider =
         ReadingLinksNotifier.new);
 
 // ---------------------------------------------------------------------------
+// Chapters you finished in the reader
+// ---------------------------------------------------------------------------
+
+/// The chapters you read to the end in the reader, per title (by the
+/// source's chapter key). Saved on the phone. This is what makes finishing
+/// a chapter count exactly once: reaching the last page, scrolling past the
+/// end and tapping "Next" all call [finish], and only the first call for a
+/// chapter records anything.
+class ReadChaptersNotifier extends Notifier<Map<String, Set<String>>> {
+  static const _key = 'read_chapters_v1';
+
+  /// Most recent keys kept per title; plenty for any series, and keeps the
+  /// saved data small.
+  static const maxPerTitle = 2000;
+
+  @override
+  Map<String, Set<String>> build() {
+    final raw = ref.read(sharedPrefsProvider).getString(_key);
+    if (raw == null) return const {};
+    try {
+      final j = jsonDecode(raw);
+      if (j is! Map) return const {};
+      return {
+        for (final e in j.entries)
+          if (e.value is List)
+            '${e.key}': {
+              for (final k in e.value as List)
+                if (k is String) k,
+            },
+      };
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  bool isRead(String entryId, String chapterKey) =>
+      state[entryId]?.contains(chapterKey) ?? false;
+
+  /// You finished [chapter] of [entryId]: remember it and move the
+  /// library's chapter count forward (never back). Returns false, and does
+  /// nothing, when this chapter was already recorded.
+  bool finish(String entryId, ChapterInfo chapter) {
+    final had = state[entryId] ?? const <String>{};
+    if (had.contains(chapter.key)) return false;
+    // Insertion order = oldest first, so trimming drops the oldest.
+    var keys = <String>{...had, chapter.key};
+    if (keys.length > maxPerTitle) {
+      keys = keys.skip(keys.length - maxPerTitle).toSet();
+    }
+    state = {...state, entryId: keys};
+    unawaited(ref.read(sharedPrefsProvider).setString(_key,
+        jsonEncode({for (final e in state.entries) e.key: e.value.toList()})));
+    final n = chapter.number;
+    if (n != null) {
+      unawaited(
+          ref.read(entriesProvider.notifier).markReadUpTo(entryId, n.floor()));
+    }
+    return true;
+  }
+
+  /// Forgets a title's finished chapters (e.g. it was removed).
+  void clear(String entryId) {
+    if (!state.containsKey(entryId)) return;
+    state = {...state}..remove(entryId);
+    unawaited(ref.read(sharedPrefsProvider).setString(_key,
+        jsonEncode({for (final e in state.entries) e.key: e.value.toList()})));
+  }
+}
+
+final readChaptersProvider =
+    NotifierProvider<ReadChaptersNotifier, Map<String, Set<String>>>(
+        ReadChaptersNotifier.new);
+
+// ---------------------------------------------------------------------------
 // Reading mode (paged right-to-left / left-to-right, long strip)
 // ---------------------------------------------------------------------------
 

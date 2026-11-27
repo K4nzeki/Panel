@@ -612,6 +612,16 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
 final entriesProvider =
     AsyncNotifierProvider<EntriesNotifier, List<Entry>>(EntriesNotifier.new);
 
+/// Lower-cased titles in your list, for "already added" checks in Discover
+/// and search. Only changes when a title is added, removed or renamed, not
+/// on every progress update, so those grids don't rebuild while you read.
+final libraryTitlesProvider = Provider<Set<String>>((ref) {
+  final joined = ref.watch(entriesProvider.select((s) => [
+        for (final e in s.value ?? const <Entry>[]) e.title.trim().toLowerCase()
+      ].join('\n')));
+  return joined.isEmpty ? const {} : joined.split('\n').toSet();
+});
+
 // ---------------------------------------------------------------------------
 // Library filters & sorting (one set per tab)
 // ---------------------------------------------------------------------------

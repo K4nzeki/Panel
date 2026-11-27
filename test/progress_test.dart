@@ -1,8 +1,40 @@
+import 'dart:convert';
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:panel/models/entry.dart';
 import 'package:panel/models/reader.dart';
 import 'package:panel/services/local_store.dart';
+import 'package:panel/state/providers.dart';
 import 'package:panel/state/reader.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// The library without storage or network: records what the reader asks.
+class FakeEntries extends EntriesNotifier {
+  FakeEntries([this.initial = const []]);
+  final List<Entry> initial;
+  final readUpTo = <(String, int)>[];
+
+  @override
+  Future<List<Entry>> build() async => initial;
+
+  @override
+  Future<void> markReadUpTo(String entryId, int number) async =>
+      readUpTo.add((entryId, number));
+}
+
+Future<(ProviderContainer, FakeEntries)> container(
+    [Map<String, Object> saved = const {}]) async {
+  SharedPreferences.setMockInitialValues(saved);
+  final prefs = await SharedPreferences.getInstance();
+  final fake = FakeEntries();
+  final c = ProviderContainer(overrides: [
+    sharedPrefsProvider.overrideWithValue(prefs),
+    entriesProvider.overrideWith(() => fake),
+  ]);
+  addTearDown(c.dispose);
+  return (c, fake);
+}
 
 Entry entry({int chapter = 0, int? total, int? latest}) => Entry(
       id: 'e1',
@@ -174,6 +206,83 @@ void main() {
     test('caught up', () {
       expect(readButtonLabel(entry(chapter: 3), link(), list),
           'Caught up · Ch. 3');
+    });
+  });
+
+  group('finishing a chapter in the reader', () {
+    test('records it and moves the library forward, once', () async {
+      final (c, library) = await container();
+      final chapters = c.read(readChaptersProvider.notifier);
+      final ch12 = ch('c12', 12);
+
+      expect(chapters.finish('e1', ch12), isTrue);
+      expect(chapters.isRead('e1', 'c12'), isTrue);
+      expect(library.readUpTo, [('e1', 12)]);
+
+      // Last page again, scrolling past the end, "Next chapter": no repeats.
+      expect(chapters.finish('e1', ch12), isFalse);
+      expect(chapters.finish('e1', ch12), isFalse);
+      expect(library.readUpTo, [('e1', 12)]);
+    });
+
+    test('extras count as the chapter before them (12.5 → 12)', () async {
+      final (c, library) = await container();
+      c.read(readChaptersProvider.notifier).finish('e1', ch('c12.5', 12.5));
+      expect(library.readUpTo, [('e1', 12)]);
+    });
+
+    test('a chapter without a number is still recorded as read', () async {
+      final (c, library) = await container();
+      final chapters = c.read(readChaptersProvider.notifier);
+      expect(chapters.finish('e1', ch('oneshot', null)), isTrue);
+      expect(chapters.isRead('e1', 'oneshot'), isTrue);
+      expect(library.readUpTo, isEmpty);
+    });
+
+    test('kept per title', () async {
+      final (c, _) = await container();
+      final chapters = c.read(readChaptersProvider.notifier);
+      chapters.finish('e1', ch('c1', 1));
+      expect(chapters.isRead('e2', 'c1'), isFalse);
+      expect(chapters.finish('e2', ch('c1', 1)), isTrue);
+    });
+
+    test('survives closing the app, and still does not repeat', () async {
+      final (c, _) = await container();
+      c.read(readChaptersProvider.notifier).finish('e1', ch('c3', 3));
+      final saved =
+          c.read(sharedPrefsProvider).getString('read_chapters_v1')!;
+
+      final (again, library) = await container({'read_chapters_v1': saved});
+      final chapters = again.read(readChaptersProvider.notifier);
+      expect(chapters.isRead('e1', 'c3'), isTrue);
+      expect(chapters.finish('e1', ch('c3', 3)), isFalse);
+      expect(library.readUpTo, isEmpty);
+    });
+
+    test('ignores unreadable saved data', () async {
+      final (c, _) = await container({'read_chapters_v1': 'not json'});
+      expect(c.read(readChaptersProvider), isEmpty);
+      final (d, _) =
+          await container({'read_chapters_v1': '{"e1":["c1",4],"e2":"x"}'});
+      expect(d.read(readChaptersProvider), {
+        'e1': {'c1'}
+      });
+    });
+
+    test('the reader bookmark stays finished after scrolling back up',
+        () async {
+      // A linked title (no source lookups needed for saving progress).
+      final (c, _) = await container({
+        'reading_links_v1': jsonEncode({'e1': link().toJson()}),
+      });
+      final links = c.read(readingLinksProvider.notifier);
+      final ch2 = ch('c2', 2);
+      links.saveProgress('e1', ch2, page: 19, pageCount: 20, finished: true);
+      links.saveProgress('e1', ch2, page: 4, pageCount: 20);
+      final l = c.read(readingLinksProvider)['e1']!;
+      expect(l.lastFinished, isTrue);
+      expect(l.lastChapterKey, 'c2');
     });
   });
 }

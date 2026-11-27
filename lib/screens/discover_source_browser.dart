@@ -126,8 +126,7 @@ class SourceBrowserState extends ConsumerState<SourceBrowser> {
   @override
   Widget build(BuildContext context) {
     final c = context.colors;
-    final entries = ref.watch(entriesProvider).value ?? const <Entry>[];
-    final inList = {for (final e in entries) e.title.trim().toLowerCase()};
+    final inList = ref.watch(libraryTitlesProvider);
     final waitingForQuery = _shownQuery.isEmpty && !_paged;
 
     return SliverMainAxisGroup(slivers: [

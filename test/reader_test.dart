@@ -1,9 +1,15 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:panel/models/entry.dart';
 import 'package:panel/models/reader.dart';
 import 'package:panel/services/local_store.dart';
 import 'package:panel/services/mangadex.dart';
+import 'package:panel/services/page_cache.dart';
+import 'package:panel/services/page_prefetcher.dart';
 import 'package:panel/services/sources/site_source.dart';
 import 'package:panel/services/sources/sites/site_adapter.dart';
 import 'package:panel/services/sources/sites/weeb_central.dart';
@@ -274,5 +280,206 @@ void main() {
     expect(back.lastChapterKey, 'c2');
     expect(back.lastPage, 4);
     expect(back.scanlators, {'A'});
+  });
+
+  group('preloading a chapter', () {
+    test('loads from the page you opened on, then the pages before it', () {
+      expect(PagePrefetcher.prefetchOrder(6, 0), [0, 1, 2, 3, 4, 5]);
+      expect(PagePrefetcher.prefetchOrder(6, 3), [3, 4, 5, 2, 1, 0]);
+      // A saved page past the end (the chapter got shorter) is clamped.
+      expect(PagePrefetcher.prefetchOrder(3, 9), [2, 1, 0]);
+      expect(PagePrefetcher.prefetchOrder(0, 0), isEmpty);
+    });
+
+    test('loads every page of the chapter', () async {
+      final loaded = <int>[];
+      final p = PagePrefetcher(
+          count: 8, start: 2, concurrency: 1, load: (i) async => loaded.add(i))
+        ..start();
+      await p.whenFinished;
+      expect(loaded, [2, 3, 4, 5, 6, 7, 1, 0]);
+      expect(p.done, {0, 1, 2, 3, 4, 5, 6, 7});
+      expect(p.isFinished, isTrue);
+    });
+
+    test('runs only a few loads at a time', () async {
+      var running = 0, peak = 0;
+      final p = PagePrefetcher(
+        count: 12,
+        concurrency: 3,
+        load: (i) async {
+          running++;
+          if (running > peak) peak = running;
+          await Future<void>.delayed(const Duration(milliseconds: 2));
+          running--;
+        },
+      )..start();
+      await p.whenFinished;
+      expect(peak, 3);
+      expect(p.done.length, 12);
+    });
+
+    test('a failing page does not stop the others', () async {
+      final p = PagePrefetcher(
+        count: 5,
+        concurrency: 2,
+        load: (i) async {
+          if (i == 1) throw const SocketException('nope');
+        },
+      )..start();
+      await p.whenFinished;
+      expect(p.failed, {1});
+      expect(p.done, {0, 2, 3, 4});
+    });
+
+    test('leaving the chapter stops loading (and records nothing more)',
+        () async {
+      final gates = <int, Completer<void>>{};
+      final started = <int>[];
+      final p = PagePrefetcher(
+        count: 10,
+        concurrency: 2,
+        load: (i) {
+          started.add(i);
+          return (gates[i] = Completer<void>()).future;
+        },
+      )..start();
+      await Future<void>.delayed(Duration.zero);
+      expect(started, [0, 1]);
+      p.cancel();
+      gates[0]!.complete();
+      gates[1]!.completeError(Exception('late'));
+      await p.whenFinished;
+      expect(started, [0, 1], reason: 'no new pages after cancel');
+      expect(p.done, isEmpty);
+      expect(p.failed, isEmpty);
+      expect(p.cancelled, isTrue);
+    });
+
+    test('cancelling before it starts finishes straight away', () async {
+      var calls = 0;
+      final p = PagePrefetcher(count: 4, load: (_) async => calls++)..cancel();
+      p.start();
+      await p.whenFinished;
+      expect(calls, 0);
+    });
+
+    test('jumping ahead loads from the new page next', () async {
+      final loaded = <int>[];
+      late PagePrefetcher p;
+      p = PagePrefetcher(
+        count: 10,
+        concurrency: 1,
+        load: (i) async {
+          loaded.add(i);
+          if (i == 0) p.focus(7);
+        },
+      )..start();
+      await p.whenFinished;
+      expect(loaded.take(4), [0, 7, 8, 9]);
+      expect(loaded.toSet().length, 10, reason: 'each page once');
+    });
+  });
+
+  group('page cache', () {
+    Uint8List bytes(int n) => Uint8List.fromList(List.filled(n, 7));
+
+    test('the page on screen and the prefetch share one download', () async {
+      final cache = PageCache();
+      var downloads = 0;
+      final gate = Completer<Uint8List>();
+      Future<Uint8List> load(String _) {
+        downloads++;
+        return gate.future;
+      }
+
+      final a = cache.get('p1', load);
+      final b = cache.get('p1', load);
+      gate.complete(bytes(10));
+      expect((await a).length, 10);
+      expect((await b).length, 10);
+      expect(downloads, 1);
+      // Saved: going back to it doesn't download again.
+      await cache.get('p1', load);
+      expect(downloads, 1);
+      expect(cache.has('p1'), isTrue);
+    });
+
+    test('a failed page is tried again next time', () async {
+      final cache = PageCache();
+      var tries = 0;
+      Future<Uint8List> load(String _) async {
+        tries++;
+        if (tries == 1) throw const SocketException('offline');
+        return bytes(4);
+      }
+
+      await expectLater(cache.get('p', load), throwsA(isA<SocketException>()));
+      expect(cache.has('p'), isFalse);
+      expect((await cache.get('p', load)).length, 4);
+      expect(tries, 2);
+    });
+
+    test('an empty image counts as failed', () async {
+      final cache = PageCache();
+      await expectLater(
+          cache.get('p', (_) async => Uint8List(0)), throwsFormatException);
+      expect(cache.has('p'), isFalse);
+    });
+
+    test('in memory, keeps within its budget (oldest dropped first)',
+        () async {
+      final cache = PageCache(memoryBudget: 25);
+      for (final u in ['a', 'b', 'c']) {
+        await cache.get(u, (_) async => bytes(10));
+      }
+      expect(cache.has('a'), isFalse);
+      expect(cache.has('b'), isTrue);
+      expect(cache.has('c'), isTrue);
+      expect(cache.memoryBytes, 20);
+    });
+
+    test('keeps only the chapters you are near', () async {
+      final cache = PageCache();
+      for (final u in ['old1', 'old2', 'cur1']) {
+        await cache.get(u, (_) async => bytes(3));
+      }
+      cache.retain(['cur1', 'cur2']);
+      expect(cache.has('old1'), isFalse);
+      expect(cache.has('old2'), isFalse);
+      expect(cache.has('cur1'), isTrue);
+      expect(cache.memoryBytes, 3);
+    });
+
+    test('on disk: saves pages as files and deletes them when closed',
+        () async {
+      final dir = await Directory.systemTemp.createTemp('pages');
+      final cache = PageCache(dir: Future.value(dir));
+      var downloads = 0;
+      await cache.get('https://cdn.example.com/1.jpg', (_) async {
+        downloads++;
+        return bytes(16);
+      });
+      expect(cache.memoryBytes, 0, reason: 'not held in memory');
+      expect(dir.listSync().length, 1);
+      final again = await cache.get('https://cdn.example.com/1.jpg',
+          (_) async => throw StateError('should come from disk'));
+      expect(again.length, 16);
+      expect(downloads, 1);
+
+      await cache.dispose();
+      expect(await dir.exists(), isFalse);
+    });
+
+    test('page images with the same url and attempt are the same image', () {
+      final cache = PageCache();
+      Future<Uint8List> load(String _) async => bytes(1);
+      expect(CachedPageImage('u', cache, load),
+          CachedPageImage('u', cache, (_) async => bytes(2)));
+      expect(CachedPageImage('u', cache, load) == CachedPageImage('u', cache, load, attempt: 1),
+          isFalse);
+      expect(CachedPageImage('u', cache, load) == CachedPageImage('u', PageCache(), load),
+          isFalse);
+    });
   });
 }
