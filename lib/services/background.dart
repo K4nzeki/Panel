@@ -112,7 +112,7 @@ class Notifications {
   static Future<void> init() async {
     if (_ready || !Background.supported) return;
     await plugin.initialize(
-      const InitializationSettings(
+      settings: const InitializationSettings(
         android: AndroidInitializationSettings('@mipmap/ic_launcher'),
       ),
       onDidReceiveNotificationResponse: (r) {
@@ -155,19 +155,19 @@ class Notifications {
     for (final u in updates.take(10)) {
       final n = u.unread;
       await plugin.show(
-        u.entry.id.hashCode & 0x7fffffff,
-        u.entry.title,
-        'Chapter ${u.latest} is out · $n new chapter${n == 1 ? '' : 's'} to read',
-        const NotificationDetails(android: _chapterChannel),
+        id: u.entry.id.hashCode & 0x7fffffff,
+        title: u.entry.title,
+        body: 'Chapter ${u.latest} is out · $n new chapter${n == 1 ? '' : 's'} to read',
+        notificationDetails: const NotificationDetails(android: _chapterChannel),
         payload: u.entry.id,
       );
     }
     if (updates.length > 1) {
       await plugin.show(
-        0,
-        'New chapters',
-        '${updates.length} series you read have new chapters',
-        const NotificationDetails(
+        id: 0,
+        title: 'New chapters',
+        body: '${updates.length} series you read have new chapters',
+        notificationDetails: const NotificationDetails(
           android: AndroidNotificationDetails(
             'new_chapters',
             'New chapters',
@@ -214,10 +214,10 @@ class Notifications {
     return _serial(() async {
       await init();
       await plugin.show(
-        id,
-        title,
-        known ? '$at of $max' : null,
-        NotificationDetails(
+        id: id,
+        title: title,
+        body: known ? '$at of $max' : null,
+        notificationDetails: NotificationDetails(
           android: AndroidNotificationDetails(
             'background_work',
             'Background activity',
@@ -244,6 +244,6 @@ class Notifications {
   static Future<void> endProgress(int id) {
     if (!Background.supported) return Future<void>.value();
     _lastProgress.remove(id);
-    return _serial(() => plugin.cancel(id));
+    return _serial(() => plugin.cancel(id: id));
   }
 }

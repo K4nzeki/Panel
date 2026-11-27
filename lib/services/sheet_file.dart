@@ -15,15 +15,21 @@ class PickedSheet {
 /// Opens the file picker for an Excel (.xlsx) or CSV file and reads the
 /// first sheet. Returns null if the user cancels.
 Future<PickedSheet?> pickSheetFile() async {
-  final result = await FilePicker.platform.pickFiles(
+  // file_picker 12+: pickFiles is static and returns a list (empty when
+  // cancelled). 13 removed withData: the bytes are read from the file.
+  final files = await FilePicker.pickFiles(
     type: FileType.custom,
     allowedExtensions: const ['xlsx', 'csv'],
-    withData: true,
   );
-  if (result == null || result.files.isEmpty) return null;
-  final file = result.files.single;
-  final bytes = file.bytes;
-  if (bytes == null) {
+  if (files.isEmpty) return null;
+  final file = files.first;
+  final List<int> bytes;
+  try {
+    bytes = await file.readAsBytes();
+  } catch (_) {
+    throw const FormatException("Couldn't read that file.");
+  }
+  if (bytes.isEmpty) {
     throw const FormatException("Couldn't read that file.");
   }
   final name = file.name;
