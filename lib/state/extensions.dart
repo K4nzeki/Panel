@@ -360,7 +360,12 @@ class ApkExtensionsNotifier extends Notifier<ApkExtensions> {
       state = next;
     } catch (_) {
       // Older build without the native side, or a broken extension list:
-      // keep what we had; website sources still work.
+      // keep what we had; website sources still work. Marked as loaded so
+      // sources don't say "still loading" forever.
+      if (!ref.mounted || gen != _gen || _last.loaded) return;
+      _last = ApkExtensions(
+          sources: _last.sources, errors: _last.errors, loaded: true);
+      state = _last;
     }
   }
 

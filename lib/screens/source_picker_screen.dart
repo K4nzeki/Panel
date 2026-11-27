@@ -33,18 +33,43 @@ class _SourcePickerScreenState extends ConsumerState<SourcePickerScreen> {
   late List<ReaderSource> _sources;
   final Map<String, Future<List<SourceSeries>>> _searches = {};
 
+  /// Set once a result was picked, so a double tap can't pop twice (which
+  /// would also close the chapters screen underneath).
+  bool _picked = false;
+
   @override
   void initState() {
     super.initState();
-    _sources = [...ref.read(readerSourcesProvider).primary];
+    final registry = ref.read(readerSourcesProvider);
+    _sources = [...registry.primary];
     // The current source (maybe one that's no longer installed) goes first.
     final link = ref.read(readingLinksProvider)[widget.entry.id];
     if (link != null) {
-      final current = ref.read(readerSourcesProvider).forLink(link);
-      _sources.removeWhere((s) => s.id == current.id);
-      _sources.insert(0, current);
+      try {
+        final current = registry.forLink(link);
+        _sources.removeWhere((s) => s.id == current.id);
+        _sources.insert(0, current);
+      } catch (_) {
+        // A broken saved link must not stop you from picking a new source.
+      }
     }
-    _searchAll();
+    // Native extensions finish loading after app start: add the ones that
+    // show up while this screen is open instead of never searching them.
+    ref.listenManual(readerSourcesProvider, (_, next) {
+      if (!mounted) return;
+      final fresh = [
+        for (final s in next.primary)
+          if (!_sources.any((x) => x.id == s.id)) s,
+      ];
+      if (fresh.isEmpty) return;
+      setState(() {
+        _sources.addAll(fresh);
+        for (final s in fresh) {
+          _searches[s.id] = _safeSearch(s, _query.text);
+        }
+      });
+    });
+    _runSearches();
   }
 
   @override
@@ -54,17 +79,35 @@ class _SourcePickerScreenState extends ConsumerState<SourcePickerScreen> {
     super.dispose();
   }
 
-  void _searchAll() => setState(() {
-        _searches.clear();
-        for (final s in _sources) {
-          _searches[s.id] = s.search(_query.text);
-        }
-      });
+  /// A source that throws straight away (instead of returning a failed
+  /// future) shows its error in its row rather than breaking the screen.
+  static Future<List<SourceSeries>> _safeSearch(ReaderSource s, String q) {
+    try {
+      return s.search(q);
+    } catch (e, st) {
+      return Future.error(e, st);
+    }
+  }
+
+  void _runSearches() {
+    _searches.clear();
+    for (final s in _sources) {
+      _searches[s.id] = _safeSearch(s, _query.text);
+    }
+  }
+
+  void _searchAll() => setState(_runSearches);
 
   void _add(ReaderSource s) => setState(() {
         if (!_sources.any((x) => x.id == s.id)) _sources.insert(0, s);
-        _searches[s.id] = s.search(_query.text);
+        _searches[s.id] = _safeSearch(s, _query.text);
       });
+
+  void _pick(ReaderSource s, SourceSeries series) {
+    if (_picked || !mounted) return;
+    _picked = true;
+    Navigator.of(context).pop(PickedSource(s, series));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -116,8 +159,7 @@ class _SourcePickerScreenState extends ConsumerState<SourcePickerScreen> {
               source: s,
               current: s.id == currentId,
               future: _searches[s.id],
-              onPick: (series) =>
-                  Navigator.of(context).pop(PickedSource(s, series)),
+              onPick: (series) => _pick(s, series),
             ),
           if (registry.available.isNotEmpty)
             ExpansionTile(

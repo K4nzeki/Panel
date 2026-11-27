@@ -99,18 +99,24 @@ internal object ExtensionLoader {
                 val results = packages
                     .map { pkg ->
                         async {
-                            val cached = previous[pkg.packageName]
-                            // Trust is checked again every time: removing a repo
-                            // or revoking trust unloads the extension.
-                            val trusted = ExtensionTrust.isTrusted(
-                                context,
-                                pkg.packageName,
-                                ExtensionTrust.signatures(pkg),
-                            )
-                            if (trusted && cached != null && cached.versionCode == pkg.longVersion()) {
-                                cached
-                            } else {
-                                loadCatching(context, pkg)
+                            // One broken package must not stop the others loading.
+                            try {
+                                val cached = previous[pkg.packageName]
+                                // Trust is checked again every time: removing a repo
+                                // or revoking trust unloads the extension.
+                                val trusted = ExtensionTrust.isTrusted(
+                                    context,
+                                    pkg.packageName,
+                                    ExtensionTrust.signatures(pkg),
+                                )
+                                if (trusted && cached != null && cached.versionCode == pkg.longVersion()) {
+                                    cached
+                                } else {
+                                    loadCatching(context, pkg)
+                                }
+                            } catch (e: Throwable) {
+                                Log.e(TAG, "Extension check failed: ${pkg.packageName}", e)
+                                fail(pkg, pkg.packageName, e.rootMessage)
                             }
                         }
                     }
@@ -130,14 +136,35 @@ internal object ExtensionLoader {
             }
         }
 
+    /**
+     * Lists apps with only the light GET_CONFIGURATIONS flag, then reads full
+     * info (metadata, signatures) for the extensions alone. Asking for
+     * signatures of every app at once can go over the binder limit on phones
+     * with many apps (TransactionTooLargeException / "Package manager has died").
+     */
     @Suppress("DEPRECATION")
     private fun installedExtensionPackages(pm: PackageManager): List<PackageInfo> {
+        val light = PackageManager.GET_CONFIGURATIONS
         val all = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.getInstalledPackages(PackageManager.PackageInfoFlags.of(PACKAGE_FLAGS.toLong()))
+            pm.getInstalledPackages(PackageManager.PackageInfoFlags.of(light.toLong()))
         } else {
-            pm.getInstalledPackages(PACKAGE_FLAGS)
+            pm.getInstalledPackages(light)
         }
-        return all.filter { info -> info.reqFeatures.orEmpty().any { it.name == EXTENSION_FEATURE } }
+        return all
+            .filter { info -> info.reqFeatures.orEmpty().any { it.name == EXTENSION_FEATURE } }
+            .mapNotNull { info ->
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        pm.getPackageInfo(info.packageName, PackageManager.PackageInfoFlags.of(PACKAGE_FLAGS.toLong()))
+                    } else {
+                        pm.getPackageInfo(info.packageName, PACKAGE_FLAGS)
+                    }
+                } catch (e: Exception) {
+                    // Uninstalled in the meantime.
+                    Log.w(TAG, "Couldn't read ${info.packageName}", e)
+                    null
+                }
+            }
     }
 
     private fun loadCatching(context: Context, pkgInfo: PackageInfo): Any = try {

@@ -26,11 +26,22 @@ class SiteSource implements ReaderSource {
     required this.lang,
     required String baseUrl,
     http.Client? client,
+    this.unsupportedReason,
   })  : base = _trimSlash(baseUrl),
         _client = client ?? _shared;
 
-  factory SiteSource.fromExt(ExtSource s) =>
-      SiteSource(name: s.name, lang: s.lang, baseUrl: s.baseUrl);
+  factory SiteSource.fromExt(ExtSource s, {String? unsupportedReason}) =>
+      SiteSource(
+          name: s.name,
+          lang: s.lang,
+          baseUrl: s.baseUrl,
+          unsupportedReason: unsupportedReason);
+
+  /// Shown instead of the generic "own site layout" message when Panel
+  /// can't read the site as a website. Set for installed extensions that
+  /// should run natively but don't (untrusted, failed, still loading), so
+  /// the error says what's really wrong and how to fix it.
+  final String? unsupportedReason;
 
   static final _shared = http.Client();
 
@@ -137,9 +148,9 @@ class SiteSource implements ReaderSource {
     // The site answered, but with a layout Panel doesn't understand
     // (custom-built sites like Asura, Flame, Weeb Central, MangaFire…).
     // Saying "No results" here would be wrong — the title may well be there.
-    throw SourceException(
+    throw SourceException(unsupportedReason ??
         "$name uses its own site layout, which Panel can't read yet. "
-        'Try another source.');
+            'Try another source.');
   }
 
   /// Whether a page comes from a site theme Panel can read (Madara or
@@ -243,8 +254,9 @@ class SiteSource implements ReaderSource {
       }
     }
     if (list.isEmpty) {
-      throw SourceException("Couldn't find chapters on $name. This site "
-          "isn't one Panel can read — try another source.");
+      throw SourceException(unsupportedReason ??
+          "Couldn't find chapters on $name. This site "
+              "isn't one Panel can read — try another source.");
     }
     return list;
   }

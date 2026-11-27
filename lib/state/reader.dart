@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/entry.dart';
 import '../models/reader.dart';
 import '../services/chapter_cache.dart';
+import '../services/extension_repo.dart' show Extension;
 import '../services/sources/apk_source.dart';
 import '../services/sources/mangadex_source.dart';
 import '../services/sources/reader_source.dart';
@@ -24,8 +25,13 @@ class ReaderSourceRegistry {
     required this.mangadex,
     required this.installed,
     required this.available,
-  }) : _byId = {
+  })  : _byId = {
           for (final s in [...installed, ...available]) s.id: s,
+        },
+        _nativeByOrigin = {
+          for (final s in installed)
+            if (s is ApkSource && (s.baseUrl ?? '').isNotEmpty)
+              SiteSource.origin(s.baseUrl!): s,
         };
 
   final MangaDexSource mangadex;
@@ -39,6 +45,10 @@ class ReaderSourceRegistry {
   final List<SiteSource> available;
 
   final Map<String, ReaderSource> _byId;
+
+  /// Natively loaded extension sources by site origin, to spot old website
+  /// links for a site whose extension now runs natively.
+  final Map<String, ApkSource> _nativeByOrigin;
 
   /// Searched together when picking a source for a title.
   List<ReaderSource> get primary => [mangadex, ...installed];
@@ -58,8 +68,44 @@ class ReaderSourceRegistry {
           baseUrl: l.sourceBaseUrl);
     }
     final base = l.sourceBaseUrl ?? l.sourceId.replaceFirst('site:', '');
-    return SiteSource(name: l.sourceName, lang: l.sourceLang, baseUrl: base);
+    // Linked back when this extension was read as a website. Its series keys
+    // are full web urls, which the native extension can't use, so the link
+    // can't be moved silently — but the error should say how to fix it.
+    final native = _nativeByOrigin[SiteSource.origin(base)];
+    return SiteSource(
+      name: l.sourceName,
+      lang: l.sourceLang,
+      baseUrl: base,
+      unsupportedReason: native == null
+          ? null
+          : 'This title was linked to ${l.sourceName} as a website. Panel now '
+              'runs the ${native.name} extension itself: tap "Change source" '
+              'and pick ${native.name} again.',
+    );
   }
+}
+
+/// Why an installed extension is being read as a plain website instead of
+/// running natively, worded for the user. Null off Android (website reading
+/// is the only option there, so the usual message fits).
+String? _notNativeReason(ApkExtensions apk, Extension e) {
+  if (!ApkBridge.supported) return null;
+  final err = apk.errorFor(e.pkg);
+  if (err != null && err.untrusted) {
+    return "${e.name}'s extension is installed but not trusted yet. Trust it "
+        'in Settings → Extension store to read it here.';
+  }
+  if (err != null) {
+    final why = err.reason.trim();
+    return "${e.name}'s extension couldn't be loaded"
+        '${why.isEmpty ? '' : ' ($why)'}. Update or reinstall it, '
+        'or pick another source.';
+  }
+  if (!apk.loaded) {
+    return "${e.name}'s extension is still loading. Try again in a moment.";
+  }
+  return "${e.name}'s extension isn't running yet. Reload extensions in the "
+      'Extension store, or pick another source.';
 }
 
 final readerSourcesProvider = Provider<ReaderSourceRegistry>((ref) {
@@ -82,10 +128,14 @@ final readerSourcesProvider = Provider<ReaderSourceRegistry>((ref) {
     if (!isInstalled && e.isNsfw) continue;
     // Runs natively: its own code replaces Panel's website reader.
     if (isInstalled && native.contains(e.pkg)) continue;
+    // Installed but not running natively (untrusted, failed, or still
+    // loading): still try the site as a website (common themes work), but
+    // when that fails say why, not "uses its own site layout".
+    final reason = isInstalled ? _notNativeReason(apk, e) : null;
     for (final s in e.sources) {
       // MangaDex is built in (through its API).
       if (s.baseUrl.contains('mangadex.org')) continue;
-      final src = SiteSource.fromExt(s);
+      final src = SiteSource.fromExt(s, unsupportedReason: reason);
       if (!seen.add(src.id)) continue;
       if (isInstalled) {
         installed.add(src);

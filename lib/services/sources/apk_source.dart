@@ -328,10 +328,24 @@ class ApkLoadError {
 
 /// What the Android side loaded.
 class ApkExtensions {
-  const ApkExtensions({this.sources = const [], this.errors = const []});
+  const ApkExtensions(
+      {this.sources = const [], this.errors = const [], this.loaded = false});
 
   final List<ApkSource> sources;
   final List<ApkLoadError> errors;
+
+  /// The Android side has answered at least once. Until then an installed
+  /// extension missing from [sources] is still loading, not broken.
+  final bool loaded;
+
+  /// Why the installed extension [pkg] isn't running natively, if Panel
+  /// knows (untrusted, or failed to load).
+  ApkLoadError? errorFor(String pkg) {
+    for (final e in errors) {
+      if (e.pkg == pkg) return e;
+    }
+    return null;
+  }
 
   /// Extensions waiting to be trusted, by package.
   Map<String, ApkLoadError> get untrusted => {
@@ -360,6 +374,7 @@ abstract final class ApkBridge {
         for (final m in errors ?? const [])
           if (ApkLoadError.fromMap(m) case final e?) e,
       ],
+      loaded: true,
     );
   }
 

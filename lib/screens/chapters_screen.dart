@@ -71,16 +71,33 @@ Future<void> openReader(BuildContext context, String entryId,
           startOffset: offset),
     ));
 
+bool _pickerOpen = false;
+
 /// Lets you choose where [entry] is read from. Returns true if one was
 /// picked.
 Future<bool> pickReadingSource(
     BuildContext context, WidgetRef ref, Entry entry) async {
-  final picked = await Navigator.of(context).push<PickedSource>(
-      MaterialPageRoute(builder: (_) => SourcePickerScreen(entry: entry)));
+  // A double tap on "Choose another source" would open two pickers.
+  if (_pickerOpen || !context.mounted) return false;
+  _pickerOpen = true;
+  PickedSource? picked;
+  try {
+    picked = await Navigator.of(context).push<PickedSource>(
+        MaterialPageRoute(builder: (_) => SourcePickerScreen(entry: entry)));
+  } finally {
+    _pickerOpen = false;
+  }
+  // The screen that opened the picker may be gone (title removed, list
+  // rebuilt): its ref can't be used any more.
   if (picked == null || !context.mounted) return false;
-  ref
-      .read(readingLinksProvider.notifier)
-      .choose(entry.id, picked.source, picked.series);
+  try {
+    ref
+        .read(readingLinksProvider.notifier)
+        .choose(entry.id, picked.source, picked.series);
+  } catch (e) {
+    if (context.mounted) showSnack(context, friendlyError(e), error: true);
+    return false;
+  }
   // Reading on MangaDex also turns on new-chapter alerts for it.
   if (picked.source.id == MangaDexSource.sourceId && !entry.isLinked) {
     unawaited(ref.read(entriesProvider.notifier).linkSource(

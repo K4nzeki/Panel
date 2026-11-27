@@ -2,6 +2,9 @@ package com.readlist.panel.ext
 
 import android.app.Application
 import android.content.Context
+import android.util.Log
+import rx.functions.Action0
+import rx.plugins.RxJavaHooks
 import eu.kanade.tachiyomi.network.JavaScriptEngine
 import eu.kanade.tachiyomi.network.NetworkHelper
 import kotlinx.serialization.ExperimentalSerializationApi
@@ -40,6 +43,22 @@ object PanelInjekt {
         }
         Injekt.addSingletonFactory<ProtoBuf> { ProtoBuf }
         Injekt.addSingletonFactory<JavaScriptEngine> { JavaScriptEngine(app) }
+
+        // Old (lib 1.4/1.5) extensions run on RxJava 1. When code scheduled
+        // on an Rx scheduler throws (e.g. an extension's own subscribe()
+        // without onError, or an error after its search was cancelled because
+        // you left the source picker), Rx 1 hands it to the thread's uncaught
+        // exception handler, which force-closes the app. Catch and log it.
+        RxJavaHooks.setOnScheduleAction { action ->
+            Action0 {
+                try {
+                    action.call()
+                } catch (e: Throwable) {
+                    Log.w("PanelExt", "Uncaught error in extension Rx code", e)
+                }
+            }
+        }
+        RxJavaHooks.setOnError { e -> Log.w("PanelExt", "Undeliverable extension error", e) }
 
         initialized = true
     }

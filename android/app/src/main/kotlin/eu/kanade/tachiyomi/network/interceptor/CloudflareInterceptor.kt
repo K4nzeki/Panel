@@ -136,7 +136,10 @@ class CloudflareInterceptor(
         }
         val headers = originalRequest.headers.toWebViewHeaders()
 
-        executor.execute {
+        // Runs on the main thread: anything thrown here (WebView missing or
+        // being updated, renderer trouble) would force-close the app, so it
+        // fails the bypass instead.
+        executor.execute { try {
             val view = createWebView(originalRequest)
             webview = view
 
@@ -204,21 +207,28 @@ class CloudflareInterceptor(
             }
 
             view.loadUrl(challengeUrl, headers)
-        }
+        } catch (e: Throwable) {
+            Log.e("PanelExt", "Couldn't start the Cloudflare WebView for $origRequestUrl", e)
+            latch.countDown()
+        } }
 
         latch.awaitFor30Seconds()
 
         executor.execute {
-            // Only destroy() can be called on a WebView whose renderer is gone.
-            if (!cloudflareBypassed && !isRenderProcessGone) {
-                isWebViewOutdated = webview?.isOutdated() == true
-            }
-            webview?.run {
-                if (!isRenderProcessGone) {
-                    removeJavascriptInterface(JS_INTERFACE)
-                    stopLoading()
+            try {
+                // Only destroy() can be called on a WebView whose renderer is gone.
+                if (!cloudflareBypassed && !isRenderProcessGone) {
+                    isWebViewOutdated = webview?.isOutdated() == true
                 }
-                destroy()
+                webview?.run {
+                    if (!isRenderProcessGone) {
+                        removeJavascriptInterface(JS_INTERFACE)
+                        stopLoading()
+                    }
+                    destroy()
+                }
+            } catch (e: Throwable) {
+                Log.e("PanelExt", "Couldn't clean up the Cloudflare WebView", e)
             }
         }
 

@@ -14,6 +14,7 @@ import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -239,10 +240,28 @@ class ExtensionBridge(context: Context) : MethodChannel.MethodCallHandler {
             val value = try {
                 block()
             } catch (e: Throwable) {
-                reportError(result, e)
+                safeReportError(result, e)
                 return@launch
             }
-            result.success(value)
+            // Encoding the answer can throw (a value the channel codec doesn't
+            // support, e.g. something an extension put in a field). Uncaught,
+            // that kills the app on the main thread; report it to Dart instead.
+            try {
+                result.success(value)
+            } catch (e: Throwable) {
+                Log.e(TAG, "Couldn't send an extension answer to Dart", e)
+                safeReportError(result, e)
+            }
+        }
+    }
+
+    /** [reportError] must never throw: it runs on the main thread. */
+    private fun safeReportError(result: MethodChannel.Result, e: Throwable) {
+        try {
+            reportError(result, e)
+        } catch (inner: Throwable) {
+            Log.e(TAG, "Couldn't report an extension error", inner)
+            runCatching { result.error("extension", e.javaClass.simpleName, null) }
         }
     }
 
@@ -351,6 +370,13 @@ class ExtensionBridge(context: Context) : MethodChannel.MethodCallHandler {
         private const val TAG = "PanelExt"
         private val EXTENSION_TIMEOUT = 60.seconds
 
-        private val sharedScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        // Last line of defence: anything that still escapes a call (extension
+        // code is third-party) is logged instead of force-closing Panel.
+        private val crashGuard = CoroutineExceptionHandler { _, e ->
+            Log.e(TAG, "Uncaught error in extension call", e)
+        }
+
+        private val sharedScope =
+            CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate + crashGuard)
     }
 }
