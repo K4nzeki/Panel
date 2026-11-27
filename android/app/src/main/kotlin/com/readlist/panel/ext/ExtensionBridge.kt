@@ -278,6 +278,13 @@ class ExtensionBridge(context: Context) : MethodChannel.MethodCallHandler {
                 val cf = generateSequence(e) { it.cause }.first { it is CloudflareBypassException }
                 result.error("cloudflare", cf.message, null)
             }
+            // OkHttp's own read / call timeouts (a slow site, or one stalling
+            // behind Cloudflare): the same answer as our overall limit, not a
+            // generic "extension failed" with a stack trace.
+            root is java.net.SocketTimeoutException ||
+                (root is java.io.InterruptedIOException &&
+                    root.message?.contains("timeout", ignoreCase = true) == true) ->
+                result.error("timeout", "The site took too long to answer", null)
             root is UnknownHostException ->
                 result.error("offline", root.message ?: "No connection", null)
             e is HttpException || root is HttpException -> {

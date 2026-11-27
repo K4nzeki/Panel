@@ -13,11 +13,15 @@ Future<void> main() async {
   // Saved covers show from the very first frame, even offline.
   await CoverCache.init();
   // New-chapter checks every 5 hours while the app is closed (Android).
-  // A failure here must never stop the app from opening.
-  try {
-    await Background.init();
-  } catch (_) {}
-  WidgetsBinding.instance.addPostFrameCallback((_) {
+  // Set up after the first frame, not before it: WorkManager and the
+  // notifications plugin each take a round trip to Android, and waiting on
+  // them kept the splash screen up. (Anything that shows a notification
+  // sets the plugin up itself first.) A failure here must never stop the
+  // app from opening.
+  WidgetsBinding.instance.addPostFrameCallback((_) async {
+    try {
+      await Background.init();
+    } catch (_) {}
     Background.requestPermission().catchError((_) {});
   });
   runApp(ProviderScope(

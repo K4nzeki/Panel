@@ -34,7 +34,16 @@ from it. The format is `MAJOR.MINOR.PATCH+BUILD`. Bump it in every release:
   Android refuses to install an update whose build number isn't higher than
   the installed one.
 
-Current: **2.2.0+13**. New: Discover can search MangaDex or any installed
+Current: **2.3.0+14**. New: the reader loads every page of a chapter in
+the background as soon as you open it, so pages are ready before you reach
+them; finishing a chapter records it as read exactly once (and marks
+chapters without a number as read too); covers are decoded at the size
+they're shown and long lists rebuild less, so scrolling uses less memory;
+Updates is now the first tab (the app still opens on Library). Also: a slow
+extension site now says "taking too long" instead of a raw error, and the
+app opens faster.
+
+Previous: **2.2.0+13** — Discover can search MangaDex or any installed
 extension and add a title linked to it; the Extension store's language
 filter is remembered and also applies to Installed, Discover and the source
 picker. Also includes the 2.1.1 fixes ("Choose another source" crash,

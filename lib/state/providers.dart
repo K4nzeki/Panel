@@ -101,8 +101,12 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
         await LocalStore.takeBackgroundPatches());
     unawaited(LocalStore.writeEntries(saved));
     _saveCovers(saved);
-    // After the list is on screen: covers and the new-chapter check.
-    unawaited(Future<void>.delayed(Duration.zero, refresh));
+    // After the list is on screen: covers and the new-chapter check. A
+    // short wait lets the first frames draw before network and JSON work
+    // compete with them.
+    unawaited(Future<void>.delayed(const Duration(milliseconds: 800), () async {
+      if (ref.mounted) await refresh();
+    }));
     return saved;
   }
 

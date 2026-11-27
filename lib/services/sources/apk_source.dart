@@ -279,6 +279,10 @@ class ApkSource implements ReaderSource, ImageFetcher {
         }
         return SourceException('$name answered with error ${code ?? '?'}.');
       default:
+        // Older native code passed a bare network timeout through as-is.
+        if ((e.message ?? '').trim().toLowerCase() == 'timeout') {
+          return SourceException('$name is taking too long. Try again.');
+        }
         return SourceException('$name: ${e.message ?? e.code}');
     }
   }
