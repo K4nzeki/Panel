@@ -7,6 +7,7 @@ cd "$(dirname "$0")"
 flutter clean
 flutter pub get
 flutter upgrade
+flutter upgrade --major-versions
 flutter analyze
 flutter test
 flutter build apk --release
