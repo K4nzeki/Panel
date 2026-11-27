@@ -24,21 +24,21 @@ dependencies:
   shared_preferences: ^2.3.2
   url_launcher: ^6.3.0
   intl: ^0.20.2
-  file_picker: ^10.3.3
+  file_picker: ^13.4.1
   archive: ^4.0.4
   # Reads extension sites' pages: chapters, page images, missing covers.
   html: ^0.15.5
   # New-chapter checks in the background + notifications.
   workmanager: ^0.10.3
   # Pinned below 20: newer versions need compileSdk 37 / AGP 9.1.
-  flutter_local_notifications: ^19.4.2
+  flutter_local_notifications: ^23.0.4
   # Where downloaded chapters, saved chapter lists and repo copies live.
   path_provider: ^2.1.5
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
-  flutter_lints: ^4.0.0
+  flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.14.4
 
 flutter:
