@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -28,7 +27,7 @@ class PageCache {
   final int memoryBudget;
 
   final _files = <String, File>{};
-  final _memory = LinkedHashMap<String, Uint8List>();
+  final _memory = <String, Uint8List>{};
   int _memoryBytes = 0;
   final _inFlight = <String, Future<Uint8List>>{};
   bool _disposed = false;

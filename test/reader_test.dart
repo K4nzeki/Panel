@@ -366,7 +366,7 @@ void main() {
 
     test('jumping ahead loads from the new page next', () async {
       final loaded = <int>[];
-      late PagePrefetcher p;
+      late final PagePrefetcher p;
       p = PagePrefetcher(
         count: 10,
         concurrency: 1,
@@ -374,8 +374,11 @@ void main() {
           loaded.add(i);
           if (i == 0) p.focus(7);
         },
-      )..start();
+      );
+      // Started after `p` is set: the first load already calls p.focus.
+      p.start();
       await p.whenFinished;
+      expect(p.failed, isEmpty);
       expect(loaded.take(4), [0, 7, 8, 9]);
       expect(loaded.toSet().length, 10, reason: 'each page once');
     });

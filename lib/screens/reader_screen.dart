@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:material_ui/material_ui.dart';
@@ -779,7 +778,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
           // Builds about one screen ahead and behind, no more: pages further
           // away are disposed (their decoded images can leave memory), and
           // the next pages are already decoded by _precacheAround.
-          cacheExtent: size.height,
+          scrollCacheExtent: const ScrollCacheExtent.viewport(1.0),
           addAutomaticKeepAlives: false,
           itemCount: pages.length + 1,
           itemBuilder: (context, i) {
