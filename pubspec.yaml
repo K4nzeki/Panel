@@ -1,6 +1,14 @@
 name: panel
 description: Panel — track the manga, manhwa, manhua and comics you read.
 publish_to: "none"
+# Version: MAJOR.MINOR.PATCH+BUILD — bump it in every release.
+#   Major update (big redesign, breaking change)  → +1.0.0  e.g. 2.1.1 → 3.0.0
+#   Minor update (new feature)                    → +0.1.0  e.g. 2.1.1 → 2.2.0
+#   Bugs fixed only                               → +0.0.1  e.g. 2.1.1 → 2.1.2
+# A bigger bump resets the numbers after it to 0.
+# BUILD (after +) always goes up by 1, whatever changed: Android won't
+# install an update over a build with the same or a higher number.
+# See "Versioning" in README.md.
 version: 2.1.1+12
 
 environment:

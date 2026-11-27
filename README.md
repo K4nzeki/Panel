@@ -16,6 +16,27 @@ flutter test
 
 Needs Flutter 3.29 or newer (`flutter --version`).
 
+## Versioning
+
+The version is set in one place: `version:` in `pubspec.yaml`. Android's
+`versionName` / `versionCode` and the APK name (`Panel-<version>.apk`) come
+from it. The format is `MAJOR.MINOR.PATCH+BUILD`. Bump it in every release:
+
+| What changed | Bump | Example (from 2.1.1+12) |
+|---|---|---|
+| Major update: big redesign, breaking change (old data or links need migrating) | +1.0.0 | 3.0.0+13 |
+| Minor update: a new feature | +0.1.0 | 2.2.0+13 |
+| Bugs fixed only | +0.0.1 | 2.1.2+13 |
+
+- A bigger bump resets the numbers after it to 0 (2.1.1 → 2.2.0, not 2.2.1).
+- If a release has a mix of changes, use the biggest one.
+- `BUILD` (the number after `+`) always goes up by 1, whatever changed.
+  Android refuses to install an update whose build number isn't higher than
+  the installed one.
+
+Current: **2.1.1+12** (fixed the "Choose another source" crash and the "uses
+its own site layout" error for downloaded extensions).
+
 ## No account needed (2.0)
 
 Panel 2.0 has **no accounts, passwords or app lock**. It opens straight into
