@@ -11,15 +11,25 @@ import 'dart:async';
 ///
 /// One failing page never stops the rest; it's listed in [failed] and the
 /// reader loads it again when it's shown.
+///
+/// [order] loads only those pages, in that order, instead: the reader uses
+/// it ([edgeOrder]) to get the first pages of the next chapter and the last
+/// pages of the previous one ready before you scroll into them.
 class PagePrefetcher {
   PagePrefetcher({
     required this.count,
     required Future<void> Function(int index) load,
     int start = 0,
     this.concurrency = 3,
+    List<int>? order,
   })  : assert(concurrency > 0),
         _load = load,
-        _queue = prefetchOrder(count, start);
+        _queue = order == null
+            ? prefetchOrder(count, start)
+            : <int>{
+                for (final i in order)
+                  if (i >= 0 && i < count) i,
+              }.toList();
 
   final int count;
   final int concurrency;
@@ -55,6 +65,17 @@ class PagePrefetcher {
       for (var i = s; i < count; i++) i,
       for (var i = s - 1; i >= 0; i--) i,
     ];
+  }
+
+  /// The pages to get ready at one end of a chapter: the first [limit]
+  /// (scrolling down into it) or, [fromEnd], the last [limit] nearest the
+  /// end first (scrolling up into it).
+  static List<int> edgeOrder(int count, {bool fromEnd = false, int limit = 4}) {
+    if (count <= 0 || limit <= 0) return [];
+    final n = limit < count ? limit : count;
+    return fromEnd
+        ? [for (var i = count - 1; i >= count - n; i--) i]
+        : [for (var i = 0; i < n; i++) i];
   }
 
   void start() {

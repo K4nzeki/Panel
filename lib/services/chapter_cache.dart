@@ -75,3 +75,78 @@ class ChapterCache {
     } catch (_) {}
   }
 }
+
+/// The page lists (image urls) of chapters asked for during one reading
+/// session, kept in memory so the next / previous chapter can be fetched
+/// ahead of time and opens at once when you scroll into it.
+///
+/// Not saved on the phone: some sources (MangaDex) hand out image urls that
+/// stop working after a while, so entries expire after [maxAge]. A failed
+/// load isn't remembered, so asking again tries again. Only the newest
+/// [maxEntries] lists are kept.
+class ChapterPagesCache {
+  ChapterPagesCache({
+    this.maxAge = const Duration(minutes: 10),
+    this.maxEntries = 8,
+    DateTime Function()? now,
+  }) : _now = now ?? DateTime.now;
+
+  final Duration maxAge;
+  final int maxEntries;
+  final DateTime Function() _now;
+
+  final _entries = <String, _PagesEntry>{};
+
+  static String _key(String sourceId, String chapterKey) =>
+      '$sourceId\n$chapterKey';
+
+  _PagesEntry? _fresh(String key) {
+    final e = _entries[key];
+    if (e == null) return null;
+    if (_now().difference(e.at) > maxAge) {
+      _entries.remove(key);
+      return null;
+    }
+    return e;
+  }
+
+  /// The page list of [chapterKey] on [sourceId]: a fresh saved one, the
+  /// request already running for it, or a new one from [load].
+  Future<List<String>> get(String sourceId, String chapterKey,
+      Future<List<String>> Function() load) {
+    final key = _key(sourceId, chapterKey);
+    final hit = _fresh(key);
+    if (hit != null) {
+      _entries.remove(key);
+      _entries[key] = hit; // most recently used
+      return hit.pages;
+    }
+    final entry = _PagesEntry(_now(), load());
+    _entries[key] = entry;
+    entry.pages.then<void>((v) {
+      entry.value = v;
+    }, onError: (Object _) {
+      if (identical(_entries[key], entry)) _entries.remove(key);
+    }).ignore();
+    while (_entries.length > maxEntries) {
+      _entries.remove(_entries.keys.first);
+    }
+    return entry.pages;
+  }
+
+  /// The saved page list, if it has already arrived (no loading).
+  List<String>? peek(String sourceId, String chapterKey) =>
+      _fresh(_key(sourceId, chapterKey))?.value;
+
+  bool has(String sourceId, String chapterKey) =>
+      _fresh(_key(sourceId, chapterKey)) != null;
+
+  void clear() => _entries.clear();
+}
+
+class _PagesEntry {
+  _PagesEntry(this.at, this.pages);
+  final DateTime at;
+  final Future<List<String>> pages;
+  List<String>? value;
+}

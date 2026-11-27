@@ -344,3 +344,108 @@ List<ChapterInfo> readingOrder(List<ChapterInfo> chapters,
   }
   return out;
 }
+
+/// The chapters loaded one after another in the long-strip reader, so you
+/// can scroll straight from one chapter into the next (or back into the
+/// previous one) without tapping "Next chapter".
+///
+/// Each item is a chapter's position in the reading order plus whatever
+/// the reader keeps for it ([T]: its pages). Items are always in reading
+/// order, with no repeats.
+///
+/// The [anchor] is the chapter the strip was opened on. The reader lays the
+/// strip out around it: chapters before the anchor grow *upwards* from it
+/// and the rest grow downwards, so loading a previous chapter above you
+/// never moves what's on screen. For the same reason only the outer ends
+/// can be dropped ([trim]): the top of the part above the anchor, and the
+/// bottom of the part below it.
+class ChapterStrip<T> {
+  ChapterStrip({this.maxChapters = 5}) : assert(maxChapters >= 3);
+
+  /// Chapters kept loaded around the one you're reading, when they can be
+  /// dropped without moving the screen.
+  final int maxChapters;
+
+  final List<(int, T)> _items = [];
+  int _anchor = 0;
+
+  bool get isEmpty => _items.isEmpty;
+  int get length => _items.length;
+  int get anchor => _anchor;
+
+  /// Reading-order positions, top to bottom.
+  List<int> get indices => [for (final (i, _) in _items) i];
+  List<T> get all => [for (final (_, v) in _items) v];
+
+  int? get firstIndex => _items.isEmpty ? null : _items.first.$1;
+  int? get lastIndex => _items.isEmpty ? null : _items.last.$1;
+
+  /// Chapters above the anchor (they grow upwards), top to bottom.
+  List<T> get before => [
+        for (final (i, v) in _items)
+          if (i < _anchor) v,
+      ];
+
+  /// The anchor and the chapters below it, top to bottom.
+  List<T> get fromAnchor => [
+        for (final (i, v) in _items)
+          if (i >= _anchor) v,
+      ];
+
+  T? at(int index) {
+    for (final (i, v) in _items) {
+      if (i == index) return v;
+    }
+    return null;
+  }
+
+  bool contains(int index) => _items.any((e) => e.$1 == index);
+
+  /// Starts over with only [index] (opening a chapter, or jumping to one).
+  void reset(int index, T value) {
+    _items
+      ..clear()
+      ..add((index, value));
+    _anchor = index;
+  }
+
+  /// Adds a chapter after the last one. Ignored unless it comes later.
+  bool append(int index, T value) {
+    final last = lastIndex;
+    if (last == null || index <= last) return false;
+    _items.add((index, value));
+    return true;
+  }
+
+  /// Adds a chapter before the first one. Ignored unless it comes earlier.
+  bool prepend(int index, T value) {
+    final first = firstIndex;
+    if (first == null || index >= first) return false;
+    _items.insert(0, (index, value));
+    return true;
+  }
+
+  /// Drops chapters far from [active] until at most [maxChapters] are left,
+  /// furthest first, and only from the outer ends: the top one when it's
+  /// above the anchor, the bottom one when it's at or below it. The
+  /// chapters right next to [active] always stay. Returns what was dropped.
+  List<T> trim(int active) {
+    final dropped = <T>[];
+    while (_items.length > maxChapters) {
+      final (fi, fv) = _items.first;
+      final (li, lv) = _items.last;
+      final firstOk = fi < _anchor && active - fi > 1;
+      final lastOk = li >= _anchor && li - active > 1;
+      if (!firstOk && !lastOk) break;
+      final dropFirst = firstOk && (!lastOk || active - fi >= li - active);
+      if (dropFirst) {
+        _items.removeAt(0);
+        dropped.add(fv);
+      } else {
+        _items.removeLast();
+        dropped.add(lv);
+      }
+    }
+    return dropped;
+  }
+}

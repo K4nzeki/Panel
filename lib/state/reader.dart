@@ -467,6 +467,31 @@ final readingModeProvider =
 });
 
 // ---------------------------------------------------------------------------
+// Continuous scrolling (long strip)
+// ---------------------------------------------------------------------------
+
+/// In the long strip, scrolling past the end of a chapter carries straight
+/// on into the next one (and scrolling up past the top into the previous
+/// one). On by default; can be turned off in the reader's settings, which
+/// brings back one chapter at a time with a "Next" button at the end.
+class ContinuousScrollNotifier extends Notifier<bool> {
+  static const _key = 'reader_continuous_v1';
+
+  @override
+  bool build() => ref.read(sharedPrefsProvider).getBool(_key) ?? true;
+
+  void set(bool on) {
+    if (state == on) return;
+    state = on;
+    unawaited(ref.read(sharedPrefsProvider).setBool(_key, on));
+  }
+}
+
+final continuousScrollProvider =
+    NotifierProvider<ContinuousScrollNotifier, bool>(
+        ContinuousScrollNotifier.new);
+
+// ---------------------------------------------------------------------------
 // Chapter lists (offline first)
 // ---------------------------------------------------------------------------
 

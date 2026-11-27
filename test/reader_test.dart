@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:panel/models/entry.dart';
 import 'package:panel/models/reader.dart';
+import 'package:panel/services/chapter_cache.dart';
 import 'package:panel/services/local_store.dart';
 import 'package:panel/services/mangadex.dart';
 import 'package:panel/services/page_cache.dart';
@@ -483,6 +484,161 @@ void main() {
           isFalse);
       expect(CachedPageImage('u', cache, load) == CachedPageImage('u', PageCache(), load),
           isFalse);
+    });
+  });
+
+  group('continuous scrolling: the chapter strip', () {
+    ChapterStrip<String> strip(int start, {int max = 5}) =>
+        ChapterStrip<String>(maxChapters: max)..reset(start, 'c$start');
+
+    test('adds chapters after the last and before the first only', () {
+      final s = strip(5);
+      expect(s.append(6, 'c6'), isTrue);
+      expect(s.append(6, 'again'), isFalse);
+      expect(s.append(3, 'c3'), isFalse);
+      expect(s.prepend(4, 'c4'), isTrue);
+      expect(s.prepend(9, 'c9'), isFalse);
+      expect(s.indices, [4, 5, 6]);
+      expect(s.at(6), 'c6');
+      expect(s.at(7), isNull);
+    });
+
+    test('chapters above the anchor are kept apart (they grow upwards)', () {
+      final s = strip(5)
+        ..prepend(4, 'c4')
+        ..prepend(3, 'c3')
+        ..append(6, 'c6');
+      expect(s.anchor, 5);
+      expect(s.before, ['c3', 'c4']);
+      expect(s.fromAnchor, ['c5', 'c6']);
+    });
+
+    test('reset starts over on one chapter', () {
+      final s = strip(5)..append(6, 'c6');
+      s.reset(9, 'c9');
+      expect(s.indices, [9]);
+      expect(s.anchor, 9);
+    });
+
+    test('drops the chapter furthest away, from a safe end', () {
+      // Opened on 5, scrolled up to 2: the bottom end is furthest.
+      final s = strip(5, max: 3)
+        ..append(6, 'c6')
+        ..prepend(4, 'c4')
+        ..prepend(3, 'c3')
+        ..prepend(2, 'c2');
+      expect(s.trim(2), ['c6', 'c5']);
+      expect(s.indices, [2, 3, 4]);
+    });
+
+    test('keeps the chapters right next to the one you read', () {
+      final s = strip(5, max: 3)
+        ..append(6, 'c6')
+        ..prepend(4, 'c4')
+        ..append(7, 'c7');
+      // At 5: 4 and 6 are neighbours; 7 is two away and can go.
+      expect(s.trim(5), ['c7']);
+      expect(s.indices, [4, 5, 6]);
+    });
+
+    test('never drops chapters between the anchor and you (the screen would move)',
+        () {
+      // Opened on 1 and read down to 5: 1..3 sit above you below the anchor.
+      final s = strip(1, max: 3);
+      for (var i = 2; i <= 5; i++) {
+        s.append(i, 'c$i');
+      }
+      expect(s.trim(5), isEmpty);
+      expect(s.indices, [1, 2, 3, 4, 5]);
+    });
+
+    test('the top end above the anchor can be dropped', () {
+      final s = strip(5, max: 3)
+        ..prepend(4, 'c4')
+        ..prepend(3, 'c3')
+        ..prepend(2, 'c2');
+      expect(s.trim(5), ['c2']);
+      expect(s.indices, [3, 4, 5]);
+    });
+  });
+
+  group('continuous scrolling: getting the next chapter ready', () {
+    test('first pages of the next chapter, last pages of the previous one',
+        () {
+      expect(PagePrefetcher.edgeOrder(10, limit: 3), [0, 1, 2]);
+      expect(PagePrefetcher.edgeOrder(10, fromEnd: true, limit: 3), [9, 8, 7]);
+      expect(PagePrefetcher.edgeOrder(2, limit: 4), [0, 1]);
+      expect(PagePrefetcher.edgeOrder(0), isEmpty);
+    });
+
+    test('a prefetcher with an order loads only those pages', () async {
+      final loaded = <int>[];
+      final p = PagePrefetcher(
+        count: 10,
+        concurrency: 1,
+        order: [9, 8, 8, 42],
+        load: (i) async => loaded.add(i),
+      )..start();
+      await p.whenFinished;
+      expect(loaded, [9, 8]);
+    });
+
+    test('page lists are fetched once and shared', () async {
+      final cache = ChapterPagesCache();
+      var calls = 0;
+      Future<List<String>> load() async {
+        calls++;
+        return ['a', 'b'];
+      }
+
+      final first = cache.get('src', 'c1', load);
+      final second = cache.get('src', 'c1', load);
+      expect(await first, ['a', 'b']);
+      expect(await second, ['a', 'b']);
+      expect(calls, 1);
+      expect(cache.peek('src', 'c1'), ['a', 'b']);
+      expect(cache.peek('src', 'c2'), isNull);
+    });
+
+    test('a failed page list is tried again', () async {
+      final cache = ChapterPagesCache();
+      var calls = 0;
+      Future<List<String>> load() async {
+        calls++;
+        if (calls == 1) throw Exception('offline');
+        return ['a'];
+      }
+
+      await expectLater(cache.get('src', 'c1', load), throwsException);
+      await Future<void>.delayed(Duration.zero);
+      expect(await cache.get('src', 'c1', load), ['a']);
+      expect(calls, 2);
+    });
+
+    test('page lists expire (image links stop working after a while)',
+        () async {
+      var now = DateTime(2026, 1, 1, 12);
+      final cache = ChapterPagesCache(
+          maxAge: const Duration(minutes: 10), now: () => now);
+      var calls = 0;
+      Future<List<String>> load() async => ['p${++calls}'];
+
+      expect(await cache.get('src', 'c1', load), ['p1']);
+      now = now.add(const Duration(minutes: 5));
+      expect(await cache.get('src', 'c1', load), ['p1']);
+      now = now.add(const Duration(minutes: 11));
+      expect(cache.has('src', 'c1'), isFalse);
+      expect(await cache.get('src', 'c1', load), ['p2']);
+    });
+
+    test('keeps only the newest lists', () async {
+      final cache = ChapterPagesCache(maxEntries: 2);
+      Future<List<String>> load() async => ['x'];
+      for (final k in ['c1', 'c2', 'c3']) {
+        await cache.get('src', k, load);
+      }
+      expect(cache.has('src', 'c1'), isFalse);
+      expect(cache.has('src', 'c3'), isTrue);
     });
   });
 }
