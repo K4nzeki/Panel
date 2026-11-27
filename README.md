@@ -9,13 +9,9 @@ phone with no account, and can read chapters in the app.
 ```bash
 # 1. Generate the Android / iOS / web platform folders (keeps lib/ and test/)
 flutter clean
-flutter pub upgrade
-flutter pub upgrade --major-version
 flutter pub get
 flutter analyze
 flutter test
-flutter run
-
 ```
 
 Needs Flutter 3.29 or newer (`flutter --version`).

@@ -107,8 +107,8 @@ List<String> _sharedStrings(String? xml) {
   return out;
 }
 
-/// All the <t> pieces of a string (rich text is split into runs), minus
-/// phonetic hints (<rPh>) that Excel stores for Japanese text.
+/// All the `<t>` pieces of a string (rich text is split into runs), minus
+/// phonetic hints (`<rPh>`) that Excel stores for Japanese text.
 String _joinText(String xml) {
   final clean = xml.replaceAll(
       RegExp(r'<(?:\w+:)?rPh\b.*?</(?:\w+:)?rPh>', dotAll: true), '');

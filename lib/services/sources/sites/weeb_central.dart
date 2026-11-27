@@ -8,8 +8,8 @@ import 'site_adapter.dart';
 /// weebcentral.com. Its pages are plain HTML pieces loaded by htmx:
 ///
 /// * search:   /search/data?text=…            → `<article>` per series
-/// * chapters: /series/<id>/full-chapter-list → `<a href="/chapters/<id>">`
-/// * pages:    /chapters/<id>/images?…        → `<img>` per page
+/// * chapters: `/series/<id>/full-chapter-list` → `<a href="/chapters/<id>">`
+/// * pages:    `/chapters/<id>/images?…`        → `<img>` per page
 class WeebCentral extends SiteAdapter {
   const WeebCentral();
 

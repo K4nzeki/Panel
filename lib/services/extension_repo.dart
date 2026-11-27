@@ -71,7 +71,7 @@ class Extension {
 
   bool get isNsfw => rating == ContentRating.nsfw;
 
-  /// From the package name: eu.kanade.tachiyomi.extension.<lang>.<name>.
+  /// From the package name: `eu.kanade.tachiyomi.extension.<lang>.<name>`.
   String get lang {
     final parts = pkg.split('.');
     final i = parts.indexOf('extension');

@@ -78,7 +78,7 @@ String downloadId(String entryId, String chapterKey) => '$entryId|$chapterKey';
 /// the phone's storage:
 ///
 ///   Android: Android/data/com.readlist.panel/files/Panel Downloads/
-///            <Title>/<Chapter (Scanlator)>/001.jpg, 002.jpg, …
+///            `<Title>/<Chapter (Scanlator)>/001.jpg`, `002.jpg`, …
 ///
 /// That folder belongs to the app, so Android needs no storage permission
 /// for it on any version (scoped storage friendly). A `.nomedia` file keeps
