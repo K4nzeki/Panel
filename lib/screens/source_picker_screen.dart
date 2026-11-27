@@ -5,6 +5,7 @@ import '../models/entry.dart';
 import '../models/reader.dart';
 import '../screens/extension_store_screen.dart' show langName;
 import '../services/sources/reader_source.dart';
+import '../state/language_filter.dart';
 import '../state/providers.dart';
 import '../state/reader.dart';
 import '../theme.dart';
@@ -41,7 +42,12 @@ class _SourcePickerScreenState extends ConsumerState<SourcePickerScreen> {
   void initState() {
     super.initState();
     final registry = ref.read(readerSourcesProvider);
-    _sources = [...registry.primary];
+    final lang = ref.read(contentLanguageProvider);
+    // Only sources in your reading language (Extension store setting).
+    _sources = [
+      for (final s in registry.primary)
+        if (matchesLanguage(lang, s.lang)) s,
+    ];
     // The current source (maybe one that's no longer installed) goes first.
     final link = ref.read(readingLinksProvider)[widget.entry.id];
     if (link != null) {
@@ -57,9 +63,12 @@ class _SourcePickerScreenState extends ConsumerState<SourcePickerScreen> {
     // show up while this screen is open instead of never searching them.
     ref.listenManual(readerSourcesProvider, (_, next) {
       if (!mounted) return;
+      final lang = ref.read(contentLanguageProvider);
       final fresh = [
         for (final s in next.primary)
-          if (!_sources.any((x) => x.id == s.id)) s,
+          if (matchesLanguage(lang, s.lang) &&
+              !_sources.any((x) => x.id == s.id))
+            s,
       ];
       if (fresh.isEmpty) return;
       setState(() {
@@ -116,9 +125,11 @@ class _SourcePickerScreenState extends ConsumerState<SourcePickerScreen> {
         readingLinksProvider.select((m) => m[widget.entry.id]?.sourceId));
     final c = context.colors;
     final filter = _moreFilter.text.trim().toLowerCase();
+    final lang = ref.watch(contentLanguageProvider);
     final more = [
       for (final s in registry.available)
-        if (!_sources.any((x) => x.id == s.id) &&
+        if (matchesLanguage(lang, s.lang) &&
+            !_sources.any((x) => x.id == s.id) &&
             (filter.isEmpty || s.name.toLowerCase().contains(filter)))
           s,
     ];
@@ -161,11 +172,13 @@ class _SourcePickerScreenState extends ConsumerState<SourcePickerScreen> {
               future: _searches[s.id],
               onPick: (series) => _pick(s, series),
             ),
-          if (registry.available.isNotEmpty)
+          if (more.isNotEmpty || filter.isNotEmpty)
             ExpansionTile(
               leading: const Icon(Icons.add_circle_outline_rounded),
               title: const Text('More sources'),
-              subtitle: Text('${registry.available.length} other sites from your repos'),
+              subtitle: Text(lang == null
+                  ? '${more.length} other sites from your repos'
+                  : '${more.length} other ${langName(lang)} sites from your repos'),
               children: [
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),

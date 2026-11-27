@@ -3,10 +3,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/entry.dart';
 import '../services/anilist.dart';
+import '../services/sources/mangadex_source.dart';
+import '../services/sources/reader_source.dart';
+import '../state/language_filter.dart';
 import '../state/providers.dart';
+import '../state/reader.dart';
 import '../theme.dart';
 import '../widgets/add_title_sheet.dart';
 import '../widgets/common.dart';
+import 'discover_source_browser.dart';
+import 'extension_store_screen.dart' show ExtensionStoreScreen, langName;
 
 class DiscoverScreen extends ConsumerStatefulWidget {
   const DiscoverScreen({super.key});
@@ -27,11 +33,22 @@ class _DiscoverScreenState extends ConsumerState<DiscoverScreen> {
   String? _error;
   int _requestId = 0;
 
+  /// Where Discover looks: null = AniList (trending, popular, top), or a
+  /// reading source (MangaDex / an installed extension) to search.
+  String? _sourceId;
+  final _browser = GlobalKey<SourceBrowserState>();
+
   @override
   void initState() {
     super.initState();
     _scroll.addListener(() {
-      if (_scroll.position.extentAfter < 600) _loadMore();
+      if (_scroll.position.extentAfter >= 600) return;
+      final browser = _browser.currentState;
+      if (browser != null) {
+        browser.loadMore();
+      } else {
+        _loadMore();
+      }
     });
     _reset();
   }
@@ -87,10 +104,25 @@ class _DiscoverScreenState extends ConsumerState<DiscoverScreen> {
     final entries = ref.watch(entriesProvider).value ?? const <Entry>[];
     final inList = {for (final e in entries) e.title.trim().toLowerCase()};
     final c = context.colors;
+    // MangaDex and your installed extensions, in your reading language.
+    final lang = ref.watch(contentLanguageProvider);
+    final sources = [
+      for (final s in ref.watch(readerSourcesProvider).primary)
+        if (matchesLanguage(lang, s.lang)) s,
+    ];
+    // The chosen extension was removed or is in another language now.
+    final source = sources.where((s) => s.id == _sourceId).firstOrNull;
 
     return Scaffold(
       body: RefreshIndicator(
-        onRefresh: () async => _reset(),
+        onRefresh: () async {
+          final browser = _browser.currentState;
+          if (source != null && browser != null) {
+            browser.refresh();
+          } else {
+            _reset();
+          }
+        },
         child: CustomScrollView(
           controller: _scroll,
           physics: const AlwaysScrollableScrollPhysics(),
@@ -104,7 +136,7 @@ class _DiscoverScreenState extends ConsumerState<DiscoverScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text('Powered by AniList',
+                  Text(source == null ? 'Powered by AniList' : 'Searching ${source.name}',
                       style: context.text.labelLarge
                           ?.copyWith(color: c.onSurfaceVariant)),
                   const SizedBox(height: 2),
@@ -112,15 +144,31 @@ class _DiscoverScreenState extends ConsumerState<DiscoverScreen> {
                 ],
               ),
               actions: [
-                IconButton(
-                  tooltip: 'Search',
-                  icon: const Icon(Icons.search_rounded),
-                  onPressed: () => showAddTitleSheet(context,
-                      status: EntryStatus.toRead),
-                ),
+                if (source == null)
+                  IconButton(
+                    tooltip: 'Search',
+                    icon: const Icon(Icons.search_rounded),
+                    onPressed: () => showAddTitleSheet(context,
+                        status: EntryStatus.toRead),
+                  ),
                 const SizedBox(width: 8),
               ],
             ),
+            SliverToBoxAdapter(
+              child: _SourceBar(
+                sources: sources,
+                selected: source,
+                language: lang,
+                onSelected: (s) {
+                  if (s?.id == source?.id) return;
+                  setState(() => _sourceId = s?.id);
+                  if (_scroll.hasClients) _scroll.jumpTo(0);
+                },
+              ),
+            ),
+            if (source != null)
+              SourceBrowser(key: _browser, source: source)
+            else ...[
             SliverToBoxAdapter(
               child: Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
@@ -229,8 +277,74 @@ class _DiscoverScreenState extends ConsumerState<DiscoverScreen> {
                 ),
               ),
             ),
+            ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// The row of places Discover can look in: AniList, then MangaDex and your
+/// installed extensions (only ones in your reading language).
+class _SourceBar extends StatelessWidget {
+  const _SourceBar({
+    required this.sources,
+    required this.selected,
+    required this.language,
+    required this.onSelected,
+  });
+
+  final List<ReaderSource> sources;
+  final ReaderSource? selected;
+  final String? language;
+  final void Function(ReaderSource?) onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final extensions =
+        sources.where((s) => s.id != MangaDexSource.sourceId).length;
+    return SizedBox(
+      height: 52,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: ChoiceChip(
+              avatar: const Icon(Icons.auto_awesome_rounded, size: 18),
+              label: const Text('AniList'),
+              selected: selected == null,
+              onSelected: (_) => onSelected(null),
+            ),
+          ),
+          for (final s in sources)
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: ChoiceChip(
+                avatar: Icon(
+                    s.id == MangaDexSource.sourceId
+                        ? Icons.menu_book_rounded
+                        : Icons.extension_rounded,
+                    size: 18),
+                label: Text(language == null && s.lang != 'all'
+                    ? '${s.name} · ${langName(s.lang)}'
+                    : s.name),
+                selected: selected?.id == s.id,
+                onSelected: (_) => onSelected(s),
+              ),
+            ),
+          if (extensions == 0)
+            ActionChip(
+              avatar: const Icon(Icons.add_rounded, size: 18),
+              label: Text(language == null
+                  ? 'Add extensions'
+                  : 'Add ${langName(language!)} extensions'),
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                  builder: (_) => const ExtensionStoreScreen())),
+            ),
+        ],
       ),
     );
   }

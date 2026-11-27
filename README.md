@@ -34,9 +34,13 @@ from it. The format is `MAJOR.MINOR.PATCH+BUILD`. Bump it in every release:
   Android refuses to install an update whose build number isn't higher than
   the installed one.
 
-Current: **2.1.1+12** (fixed the "Choose another source" crash, the "uses
-its own site layout" error for downloaded extensions, and crashes from
-extensions that need zstd, like Asura Scans).
+Current: **2.2.0+13**. New: Discover can search MangaDex or any installed
+extension and add a title linked to it; the Extension store's language
+filter is remembered and also applies to Installed, Discover and the source
+picker. Also includes the 2.1.1 fixes ("Choose another source" crash,
+"uses its own site layout" for downloaded extensions, zstd extensions such
+as Asura Scans) and the file_picker 13 / flutter_local_notifications 23
+updates.
 
 ## No account needed (2.0)
 

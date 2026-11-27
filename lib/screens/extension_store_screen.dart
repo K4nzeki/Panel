@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/extension_repo.dart';
 import '../services/sources/apk_source.dart';
 import '../state/extensions.dart';
+import '../state/language_filter.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 import '../widgets/entry_sheet.dart' show confirm;
@@ -24,7 +25,6 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
   final _search = TextEditingController();
   bool _installedOnly = false;
   bool _showNsfw = false;
-  String? _lang; // null = every language
 
   @override
   void initState() {
@@ -53,18 +53,17 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
     final installedOnly = _installedOnly || store.repoUrls.isEmpty;
 
     final all = store.extensions;
-    final langs = {for (final e in all) e.lang}.toList()
+    // Multi-language extensions always show, so "Multi" isn't a choice.
+    final langs = {for (final e in all) if (e.lang != 'all' && e.lang.isNotEmpty) e.lang}.toList()
       ..sort((a, b) => langName(a).compareTo(langName(b)));
-    // Default to English when the repo has it.
-    final lang = _lang ?? (langs.contains('en') ? 'en' : null);
+    // Your reading language (shared with Discover and the source picker).
+    final lang = ref.watch(contentLanguageProvider);
     final q = _search.text.trim().toLowerCase();
     final shown = all.where((e) {
       if (q.isNotEmpty && !e.name.toLowerCase().contains(q)) return false;
+      if (!matchesLanguage(lang, e.lang)) return false;
       if (installedOnly) return store.isInstalled(e);
       if (!_showNsfw && e.isNsfw) return false;
-      if (lang != null && lang != '*' && e.lang != lang && e.lang != 'all') {
-        return false;
-      }
       return true;
     }).toList()
       ..sort((a, b) {
@@ -176,12 +175,14 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
                                 ),
                         ),
                       ),
-                      if (!installedOnly) ...[
-                        const SizedBox(height: 8),
-                        Wrap(spacing: 8, children: [
+                      const SizedBox(height: 8),
+                      Wrap(spacing: 8, children: [
                           PopupMenuButton<String>(
                             initialValue: lang ?? '*',
-                            onSelected: (v) => setState(() => _lang = v),
+                            tooltip: 'Language of the series you read',
+                            onSelected: (v) => ref
+                                .read(contentLanguageProvider.notifier)
+                                .set(v),
                             itemBuilder: (_) => [
                               const PopupMenuItem(
                                   value: '*', child: Text('All languages')),
@@ -191,18 +192,27 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
                             child: Chip(
                               avatar: const Icon(Icons.translate_rounded,
                                   size: 18),
-                              label: Text(lang == null || lang == '*'
-                                  ? 'All languages'
-                                  : langName(lang)),
+                              label: Text(
+                                  lang == null ? 'All languages' : langName(lang)),
                             ),
                           ),
-                          FilterChip(
-                            label: const Text('Show 18+'),
-                            selected: _showNsfw,
-                            onSelected: (v) => setState(() => _showNsfw = v),
-                          ),
+                          if (!installedOnly)
+                            FilterChip(
+                              label: const Text('Show 18+'),
+                              selected: _showNsfw,
+                              onSelected: (v) => setState(() => _showNsfw = v),
+                            ),
                         ]),
-                      ],
+                      if (lang != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4),
+                          child: Text(
+                            'Discover and source search only show '
+                            '${langName(lang)} (and multi-language) sources.',
+                            style: context.text.bodySmall
+                                ?.copyWith(color: c.onSurfaceVariant),
+                          ),
+                        ),
                       if (installedOnly && installedCount > 0)
                         Padding(
                           padding: const EdgeInsets.only(top: 12),
@@ -233,10 +243,10 @@ class _ExtensionStoreScreenState extends ConsumerState<ExtensionStoreScreen> {
                     icon: installedOnly
                         ? Icons.extension_off_outlined
                         : Icons.search_off_rounded,
-                    title: installedOnly
+                    title: installedOnly && installedCount == 0
                         ? 'No extensions installed'
                         : 'Nothing matches',
-                    message: installedOnly
+                    message: installedOnly && installedCount == 0
                         ? 'Install one from Browse.'
                         : 'Try another name or language.',
                   ),

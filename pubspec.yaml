@@ -9,7 +9,7 @@ publish_to: "none"
 # BUILD (after +) always goes up by 1, whatever changed: Android won't
 # install an update over a build with the same or a higher number.
 # See "Versioning" in README.md.
-version: 2.1.1+12
+version: 2.2.0+13
 
 environment:
   sdk: ">=3.7.0 <4.0.0"
