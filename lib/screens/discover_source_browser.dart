@@ -198,9 +198,9 @@ class SourceBrowserState extends ConsumerState<SourceBrowser> {
       _loading = false;
       _hasMore = _sources.any((s) => s is BrowsableSource && !_done.contains(s.id));
       if (pages.isEmpty && firstError != null && _results.isEmpty) {
-        _error = friendlyError(firstError!);
+        _error = friendlyError(firstError);
       } else if (firstError != null && !widget.allSources) {
-        _error = friendlyError(firstError!);
+        _error = friendlyError(firstError);
       }
     });
     // Everything on this page was a duplicate: try the next one.

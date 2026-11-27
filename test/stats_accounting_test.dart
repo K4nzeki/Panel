@@ -88,14 +88,14 @@ void main() {
     setUp(() => SharedPreferences.setMockInitialValues({}));
 
     test('lowering the chapter takes it back off the day it was read',
-        () async {
-      final a = entry(chapter: 0);
-      final b = a.copyWith(chapter: 10);
-      await LocalStore.recordActivity(a, b, {'chapter': 10});
-      expect(await today(), 10);
-      await LocalStore.recordActivity(b, b.copyWith(chapter: 7), {'chapter': 7});
-      expect(await today(), 7);
-    });
+            () async {
+          final a = entry(chapter: 0);
+          final b = a.copyWith(chapter: 10);
+          await LocalStore.recordActivity(a, b, {'chapter': 10});
+          expect(await today(), 10);
+          await LocalStore.recordActivity(b, b.copyWith(chapter: 7), {'chapter': 7});
+          expect(await today(), 7);
+        });
 
     test('a reread keeps the days when the count is cleared', () async {
       final a = entry(chapter: 0);
@@ -108,22 +108,22 @@ void main() {
     });
 
     test('deleting a title takes its chapters off; undo puts them back',
-        () async {
-      final a = entry(chapter: 0);
-      await LocalStore.recordActivity(a, a.copyWith(chapter: 12), {'chapter': 12});
-      final other = Entry(
-          id: 'e2', title: 'Other', type: EntryType.manga, status: EntryStatus.reading);
-      await LocalStore.recordActivity(
-          other, other.copyWith(chapter: 3), {'chapter': 3});
-      expect(await today(), 15);
+            () async {
+          final a = entry(chapter: 0);
+          await LocalStore.recordActivity(a, a.copyWith(chapter: 12), {'chapter': 12});
+          const other = Entry(
+              id: 'e2', title: 'Other', type: EntryType.manga, status: EntryStatus.reading);
+          await LocalStore.recordActivity(
+              other, other.copyWith(chapter: 3), {'chapter': 3});
+          expect(await today(), 15);
 
-      final log = await LocalStore.forgetEntry('e1');
-      expect(await today(), 3);
-      expect(log, isNotNull);
+          final log = await LocalStore.forgetEntry('e1');
+          expect(await today(), 3);
+          expect(log, isNotNull);
 
-      await LocalStore.restoreEntry('e1', log!);
-      expect(await today(), 15);
-    });
+          await LocalStore.restoreEntry('e1', log!);
+          expect(await today(), 15);
+        });
 
     test('old activity without per-title data still loads', () async {
       SharedPreferences.setMockInitialValues({
