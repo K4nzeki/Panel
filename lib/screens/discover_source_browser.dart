@@ -53,9 +53,9 @@ class SourceBrowserState extends ConsumerState<SourceBrowser> {
   }
 
   @override
-  void didUpdateWidget(SourceBrowser old) {
-    super.didUpdateWidget(old);
-    if (old.source.id != widget.source.id) {
+  void didUpdateWidget(SourceBrowser oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.source.id != widget.source.id) {
       _query.clear();
       _run('');
     }
