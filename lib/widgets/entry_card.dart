@@ -390,3 +390,19 @@ Future<void> deleteWithUndo(
     messenger.showSnackBar(SnackBar(content: Text(friendlyError(e))));
   }
 }
+
+/// Asks first, then removes [entry] from your list with an "Undo"
+/// snackbar (used by Discover's long-press and preview). Returns whether it
+/// was removed.
+Future<bool> confirmRemoveFromList(
+    BuildContext context, WidgetRef ref, Entry entry) async {
+  final ok = await confirm(context,
+      title: 'Remove “${entry.title}” from your list?',
+      message: 'Its progress and the chapters it added to Stats are removed '
+          'too. You can undo right after.',
+      action: 'Remove',
+      destructive: true);
+  if (ok != true || !context.mounted) return false;
+  await deleteWithUndo(context, ref, entry);
+  return true;
+}

@@ -296,6 +296,16 @@ List<ChapterInfo> filterByScanlator(
   ];
 }
 
+/// Only the chapters in [favorites] (chapter keys), in the same order.
+List<ChapterInfo> filterFavorites(
+    List<ChapterInfo> chapters, Set<String> favorites) {
+  if (favorites.isEmpty) return const [];
+  return [
+    for (final c in chapters)
+      if (favorites.contains(c.key)) c,
+  ];
+}
+
 /// Oldest-first reading order with one release per chapter number: when
 /// several groups translated the same chapter, the one by [preferred] (the
 /// group you were last reading) wins, otherwise the first listed.

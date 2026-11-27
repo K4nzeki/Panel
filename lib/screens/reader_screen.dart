@@ -317,7 +317,8 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
       _pageOffset = offset.toDouble();
     });
     _save();
-    ref.read(entriesProvider.notifier).touch(widget.entryId);
+    // Starting a To Read title moves it into your library (Reading).
+    unawaited(ref.read(entriesProvider.notifier).startReading(widget.entryId));
     // Every page of the chapter starts loading now, from where you opened.
     _startPrefetch(pages, start);
     _precacheAround(start);
@@ -847,6 +848,32 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                         ],
                       ),
                     ),
+                    Consumer(builder: (context, ref, _) {
+                      final key = _chapter.key;
+                      final fav = ref.watch(favoriteChaptersProvider.select(
+                          (m) => m[widget.entryId]?.contains(key) ?? false));
+                      return IconButton(
+                        tooltip:
+                            fav ? 'Remove from favorites' : 'Add to favorites',
+                        onPressed: () {
+                          final on = ref
+                              .read(favoriteChaptersProvider.notifier)
+                              .toggle(widget.entryId, key);
+                          ScaffoldMessenger.maybeOf(context)
+                            ?..hideCurrentSnackBar()
+                            ..showSnackBar(SnackBar(
+                              duration: const Duration(seconds: 2),
+                              content: Text(on
+                                  ? 'Added to favorite chapters'
+                                  : 'Removed from favorite chapters'),
+                            ));
+                        },
+                        icon: Icon(
+                          fav ? Icons.star_rounded : Icons.star_outline_rounded,
+                          color: fav ? const Color(0xFFFFC94D) : Colors.white,
+                        ),
+                      );
+                    }),
                     if (DownloadStore.supported)
                       IconButton(
                         tooltip: downloaded

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'discover_screen.dart';
 import 'list_screen.dart';
 import 'profile_screen.dart';
+import 'legal_screen.dart';
 import 'stats_screen.dart';
 import 'updates_screen.dart';
 import '../models/entry.dart';
@@ -13,6 +14,7 @@ import '../state/inbox.dart';
 import '../state/providers.dart';
 import '../widgets/common.dart';
 import '../widgets/update_dialog.dart';
+import '../widgets/updates_button.dart';
 
 class HomeShell extends ConsumerStatefulWidget {
   const HomeShell({super.key});
@@ -22,11 +24,10 @@ class HomeShell extends ConsumerStatefulWidget {
 }
 
 class _HomeShellState extends ConsumerState<HomeShell> {
-  // Tab positions in the bottom bar. Updates comes first; the app still
-  // opens on Library.
-  static const _updatesTab = 0;
-  static const _libraryTab = 1;
-  static const _statsTab = 4;
+  // Tab positions in the bottom bar. Updates isn't a tab any more: it's the
+  // bell at the top of the main screens (see UpdatesButton).
+  static const _libraryTab = 0;
+  static const _statsTab = 3;
 
   int _index = _libraryTab;
   final _openedAt = DateTime.now();
@@ -44,6 +45,8 @@ class _HomeShellState extends ConsumerState<HomeShell> {
       } else {
         _onNotificationTap();
       }
+      // First run: what Panel is and isn't responsible for.
+      if (mounted) await showLegalNoticeOnce(context, ref);
       // Quietly look for a new GitHub release (at most every 12 hours).
       if (mounted) checkForUpdates(context, ref);
     });
@@ -62,20 +65,22 @@ class _HomeShellState extends ConsumerState<HomeShell> {
     _openFromNotification(payload);
   }
 
-  /// Goes to the Updates tab and, for a single series, opens it.
+  /// The summary notification opens Updates; a single series' opens that
+  /// series (on the Library tab).
   void _openFromNotification(String payload) {
     if (!mounted) return;
-    // Close any sheet or page on top so the series opens on the tab.
+    // Close any sheet or page on top first.
     Navigator.of(context).popUntil((r) => r.isFirst);
-    _select(_updatesTab);
     ref.read(inboxProvider.notifier).reload();
-    if (payload != Notifications.updatesPayload) {
+    if (payload == Notifications.updatesPayload) {
+      openUpdates(context, ref);
+    } else {
+      _select(_libraryTab);
       openSeries(context, ref, payload);
     }
   }
 
   static const _pages = <Widget>[
-    UpdatesScreen(),
     ListScreen(tab: ListTab.library),
     ListScreen(tab: ListTab.toRead),
     DiscoverScreen(),
@@ -89,10 +94,6 @@ class _HomeShellState extends ConsumerState<HomeShell> {
       ref.invalidate(chaptersPerDayProvider);
       ref.invalidate(completionsPerMonthProvider);
     }
-    if (i == _updatesTab && _index != _updatesTab) {
-      // The background job may have added alerts.
-      ref.read(inboxProvider.notifier).reload();
-    }
     setState(() => _index = i);
   }
 
@@ -100,7 +101,6 @@ class _HomeShellState extends ConsumerState<HomeShell> {
   Widget build(BuildContext context) {
     final toReadCount = ref.watch(
         statusCountsProvider.select((m) => m[EntryStatus.toRead] ?? 0));
-    final unread = ref.watch(unreadAlertsProvider);
     // New chapters found while you're in the app: say so here too.
     ref.listen<List<ChapterAlert>>(inboxProvider, (before, now) {
       String key(ChapterAlert a) => '${a.entryId}@${a.at.millisecondsSinceEpoch}';
@@ -109,13 +109,13 @@ class _HomeShellState extends ConsumerState<HomeShell> {
           .where((a) =>
               !a.read && a.at.isAfter(_openedAt) && !old.contains(key(a)))
           .length;
-      if (added <= 0 || _index == _updatesTab) return;
+      if (added <= 0) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(added == 1
             ? 'A series you read has a new chapter'
             : '$added series you read have new chapters'),
         action: SnackBarAction(
-            label: 'View', onPressed: () => _select(_updatesTab)),
+            label: 'View', onPressed: () => openUpdates(context, ref)),
       ));
     });
 
@@ -130,19 +130,6 @@ class _HomeShellState extends ConsumerState<HomeShell> {
         selectedIndex: _index,
         onDestinationSelected: _select,
         destinations: [
-          NavigationDestination(
-            icon: Badge(
-              isLabelVisible: unread > 0,
-              label: Text('$unread'),
-              child: const Icon(Icons.notifications_none_rounded),
-            ),
-            selectedIcon: Badge(
-              isLabelVisible: unread > 0,
-              label: Text('$unread'),
-              child: const Icon(Icons.notifications_rounded),
-            ),
-            label: 'Updates',
-          ),
           const NavigationDestination(
             icon: Icon(Icons.collections_bookmark_outlined),
             selectedIcon: Icon(Icons.collections_bookmark_rounded),

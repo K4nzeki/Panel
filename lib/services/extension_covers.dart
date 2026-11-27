@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'extension_repo.dart';
 import 'mangadex.dart' show normalizeTitle;
+import 'sources/reader_source.dart';
 
 /// Finds a cover on the sites of the extensions you installed, for titles
 /// AniList and MangaDex don't have.
@@ -169,5 +170,33 @@ class ExtensionCoverFinder {
     return abs
         .toString()
         .replaceFirst(RegExp(r'-\d{2,4}x\d{2,4}(?=\.(jpe?g|png|webp)$)'), '');
+  }
+}
+
+/// The cover from the source a title is read from (its reading link, or
+/// the MangaDex series it's linked to), for titles in your list that have
+/// none. Asked before AniList and the extension sites: it's the exact
+/// series you read, so the cover is the right one.
+abstract final class SourceCovers {
+  static const _timeout = Duration(seconds: 15);
+
+  /// The cover of [seriesKey] on [source], or null when the source can't
+  /// say (no cover, not reachable, or a source that can't look one up).
+  /// Throws only [SourceException]s that mean "offline".
+  static Future<String?> find(
+      ReaderSource source, String seriesKey, String title) async {
+    if (source is! CoverSource) return null;
+    try {
+      final url = await (source as CoverSource)
+          .seriesCover(seriesKey, title: title)
+          .timeout(_timeout);
+      final u = url?.trim() ?? '';
+      return u.isEmpty ? null : u;
+    } on SourceException catch (e) {
+      if (e.offline) rethrow;
+      return null;
+    } catch (_) {
+      return null;
+    }
   }
 }

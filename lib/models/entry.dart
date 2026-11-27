@@ -66,6 +66,8 @@ class Entry {
     required this.status,
     this.chapter = 0,
     this.reread = 0,
+    this.chaptersBanked = 0,
+    this.rereadOverlap = 0,
     this.position = 0,
     this.createdAt,
     this.coverUrl,
@@ -84,6 +86,16 @@ class Entry {
   final EntryStatus status;
   final int chapter;
   final int reread;
+
+  /// Chapters Stats keeps from earlier read-throughs: set when you add a
+  /// reread, so clearing the chapter count to start over doesn't take them
+  /// off Stats. See [withChapterAccounting].
+  final int chaptersBanked;
+
+  /// How much of [chapter] is already inside [chaptersBanked] (the chapter
+  /// you were on when the reread was added), so it isn't counted twice.
+  /// Shrinks when [chapter] goes below it.
+  final int rereadOverlap;
   final int position;
   final DateTime? createdAt;
   final String? coverUrl;
@@ -101,6 +113,14 @@ class Entry {
   final DateTime? latestCheckedAt;
 
   bool get isLinked => sourceId != null && sourceId != noSourceFound;
+
+  /// Chapters this title adds to Stats: this read-through plus earlier ones
+  /// ([chaptersBanked]). Deleting the title takes all of them off; lowering
+  /// [chapter] takes the difference off.
+  int get chaptersCounted {
+    final n = chaptersBanked + chapter - rereadOverlap;
+    return n < 0 ? 0 : n;
+  }
 
   /// Chapters out that you haven't read yet (0 when unknown).
   int get unreadChapters {
@@ -146,6 +166,8 @@ class Entry {
         status: EntryStatus.parse(j['status'] as String?),
         chapter: _toInt(j['chapter']) ?? 0,
         reread: _toInt(j['reread']) ?? 0,
+        chaptersBanked: _toInt(j['chapters_banked']) ?? 0,
+        rereadOverlap: _toInt(j['reread_overlap']) ?? 0,
         position: _toInt(j['position']) ?? 0,
         createdAt: _toDate(j['created_at']),
         coverUrl: j['cover_url'] as String?,
@@ -165,6 +187,8 @@ class Entry {
         'status': status.label,
         'chapter': chapter,
         'reread': reread,
+        'chapters_banked': chaptersBanked,
+        'reread_overlap': rereadOverlap,
         'position': position,
         'created_at': createdAt?.toIso8601String(),
         'cover_url': coverUrl,
@@ -183,6 +207,8 @@ class Entry {
     EntryStatus? status,
     int? chapter,
     int? reread,
+    int? chaptersBanked,
+    int? rereadOverlap,
     int? position,
     DateTime? lastReadAt,
     // Nullable fields use a wrapper so they can be explicitly cleared.
@@ -201,6 +227,8 @@ class Entry {
         status: status ?? this.status,
         chapter: chapter ?? this.chapter,
         reread: reread ?? this.reread,
+        chaptersBanked: chaptersBanked ?? this.chaptersBanked,
+        rereadOverlap: rereadOverlap ?? this.rereadOverlap,
         position: position ?? this.position,
         createdAt: createdAt,
         lastReadAt: lastReadAt ?? this.lastReadAt,
@@ -216,6 +244,32 @@ class Entry {
             ? latestCheckedAt.value
             : this.latestCheckedAt,
       );
+}
+
+/// Keeps [Entry.chaptersCounted] right when a change from [before] to
+/// [after] touches the reread count or the chapter:
+///
+/// - Adding a reread banks everything counted so far. The chapter you're
+///   on overlaps the bank, so the total doesn't jump; clearing the chapter
+///   to start over then keeps the total, and reading again adds to it.
+/// - Removing a reread keeps the total too (chapters read stay read).
+/// - Lowering the chapter outside a reread takes the difference off.
+Entry withChapterAccounting(Entry before, Entry after) {
+  var banked = after.chaptersBanked;
+  var overlap = after.rereadOverlap;
+  if (after.reread > before.reread) {
+    banked = before.chaptersCounted;
+    overlap = before.chapter;
+  } else if (after.reread < before.reread && overlap > 0) {
+    banked = banked > overlap ? banked - overlap : 0;
+    overlap = 0;
+  }
+  if (overlap > after.chapter) overlap = after.chapter;
+  if (overlap < 0) overlap = 0;
+  if (banked == after.chaptersBanked && overlap == after.rereadOverlap) {
+    return after;
+  }
+  return after.copyWith(chaptersBanked: banked, rereadOverlap: overlap);
 }
 
 /// Lets [Entry.copyWith] tell "leave unchanged" (null) apart from

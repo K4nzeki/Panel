@@ -52,6 +52,8 @@ class LocalStore {
   static const progressColumns = {
     'chapter',
     'reread',
+    'chapters_banked',
+    'reread_overlap',
     'status',
     'last_read_at',
   };
@@ -109,11 +111,17 @@ class LocalStore {
   /// into Finished or an extra reread is one finish this month, and only
   /// chapters *read* count for today — the chapter number going up.
   ///
-  /// Anything else never counts as reading: the newest chapter / total
-  /// going up (a new chapter came out), or the chapter going down (fixing
-  /// a mistake, starting a reread). Going down used to count the whole new
-  /// chapter number as read today, so a −1 correction from 50 to 49 logged
-  /// 49 chapters.
+  /// Chapters logged per day are also remembered per title, so they can
+  /// come off again:
+  /// - the chapter number going down (fixing a mistake) takes that many
+  ///   chapters back off the days they were logged on, newest first;
+  /// - deleting the title takes all of its chapters off ([forgetEntry]).
+  ///
+  /// Adding a reread closes the current read-through: its chapters stay on
+  /// Stats even when the chapter number is then cleared to start over.
+  ///
+  /// A new chapter coming out (newest chapter / total going up) never
+  /// counts as reading.
   static Future<void> recordActivity(
       Entry before, Entry after, Map<String, dynamic> patch) async {
     var finishes = 0;
@@ -127,27 +135,33 @@ class LocalStore {
     if (rereadDelta > 0) finishes += rereadDelta;
 
     final chapters = chaptersReadDelta(before, after, patch);
-    if (finishes <= 0 && chapters <= 0) return;
+    final unread = chaptersUnreadDelta(before, after, patch);
+    if (finishes <= 0 && chapters <= 0 && unread <= 0 && rereadDelta <= 0) {
+      return;
+    }
 
     final prefs = await _prefs();
     final a = _activity(prefs);
+    final log = a.entries.putIfAbsent(before.id, EntryLog.new);
+    // A reread first, so clearing the count in the same change keeps the
+    // finished read-through's chapters.
+    if (rereadDelta > 0) log.closeReadThrough();
+    if (unread > 0) {
+      final removed = log.takeBack(unread);
+      _subtract(a.days, removed);
+    }
     if (chapters > 0) {
       final k = localDayKey();
       a.days[k] = (a.days[k] ?? 0) + chapters;
+      log.current[k] = (log.current[k] ?? 0) + chapters;
     }
     if (finishes > 0) {
       final k = localMonthKey();
       a.months[k] = (a.months[k] ?? 0) + finishes;
     }
-    // Keep about a year and a half of days; months are tiny.
-    if (a.days.length > 550) {
-      final keys = a.days.keys.toList()..sort();
-      for (final k in keys.take(a.days.length - 550)) {
-        a.days.remove(k);
-      }
-    }
-    await prefs.setString(
-        _activityKey, jsonEncode({'days': a.days, 'months': a.months}));
+    if (log.isEmpty) a.entries.remove(before.id);
+    _trim(a);
+    await _writeActivity(prefs, a);
   }
 
   /// Chapters a change counts as read: how far the chapter number moved
@@ -158,6 +172,68 @@ class LocalStore {
     if (!patch.containsKey('chapter')) return 0;
     final d = after.chapter - before.chapter;
     return d > 0 ? d : 0;
+  }
+
+  /// How far the chapter number moved back, 0 otherwise.
+  static int chaptersUnreadDelta(
+      Entry before, Entry after, Map<String, dynamic> patch) {
+    if (!patch.containsKey('chapter')) return 0;
+    final d = before.chapter - after.chapter;
+    return d > 0 ? d : 0;
+  }
+
+  /// A title was deleted: takes every chapter logged for it off the daily
+  /// counts. Returns what was removed so [restoreEntry] can put it back
+  /// (Undo); null when nothing was logged for it.
+  static Future<EntryLog?> forgetEntry(String entryId) async {
+    final prefs = await _prefs();
+    final a = _activity(prefs);
+    final log = a.entries.remove(entryId);
+    if (log == null) return null;
+    _subtract(a.days, log.current);
+    _subtract(a.days, log.earlier);
+    await _writeActivity(prefs, a);
+    return log;
+  }
+
+  /// Undo of [forgetEntry].
+  static Future<void> restoreEntry(String entryId, EntryLog log) async {
+    final prefs = await _prefs();
+    final a = _activity(prefs);
+    if (a.entries.containsKey(entryId)) return;
+    a.entries[entryId] = log;
+    for (final m in [log.current, log.earlier]) {
+      for (final e in m.entries) {
+        a.days[e.key] = (a.days[e.key] ?? 0) + e.value;
+      }
+    }
+    await _writeActivity(prefs, a);
+  }
+
+  static void _subtract(Map<String, int> days, Map<String, int> by) {
+    for (final e in by.entries) {
+      final left = (days[e.key] ?? 0) - e.value;
+      if (left > 0) {
+        days[e.key] = left;
+      } else {
+        days.remove(e.key);
+      }
+    }
+  }
+
+  /// Keeps about a year and a half of days; months are tiny.
+  static void _trim(_Activity a) {
+    if (a.days.length <= 550) return;
+    final keys = a.days.keys.toList()..sort();
+    final cutoff = keys[a.days.length - 550];
+    for (final k in keys.take(a.days.length - 550)) {
+      a.days.remove(k);
+    }
+    for (final log in a.entries.values) {
+      log.current.removeWhere((k, _) => k.compareTo(cutoff) < 0);
+      log.earlier.removeWhere((k, _) => k.compareTo(cutoff) < 0);
+    }
+    a.entries.removeWhere((_, log) => log.isEmpty);
   }
 
   /// Chapters read per local day for the last [days] days (oldest first).
@@ -184,20 +260,41 @@ class LocalStore {
     });
   }
 
-  static ({Map<String, int> days, Map<String, int> months}) _activity(
-      SharedPreferences prefs) {
-    Map<String, int> read(Object? m) => {
-          if (m is Map)
-            for (final e in m.entries)
-              if (e.value is num) '${e.key}': (e.value as num).toInt(),
-        };
+  static _Activity _activity(SharedPreferences prefs) {
     try {
       final raw = prefs.getString(_activityKey);
       final j = raw == null ? null : jsonDecode(raw);
-      if (j is Map) return (days: read(j['days']), months: read(j['months']));
+      if (j is Map) {
+        final entries = j['entries'];
+        return (
+          days: _intMap(j['days']),
+          months: _intMap(j['months']),
+          entries: {
+            if (entries is Map)
+              for (final e in entries.entries)
+                '${e.key}': EntryLog.fromJson(e.value),
+          },
+        );
+      }
     } catch (_) {}
-    return (days: <String, int>{}, months: <String, int>{});
+    return (
+      days: <String, int>{},
+      months: <String, int>{},
+      entries: <String, EntryLog>{},
+    );
   }
+
+  static Future<void> _writeActivity(
+          SharedPreferences prefs, _Activity a) =>
+      prefs.setString(
+          _activityKey,
+          jsonEncode({
+            'days': a.days,
+            'months': a.months,
+            'entries': {
+              for (final e in a.entries.entries) e.key: e.value.toJson(),
+            },
+          }));
 
   // ---- One-time move from the account version ----
 
@@ -262,6 +359,68 @@ class LocalStore {
       return {};
     }
   }
+}
+
+typedef _Activity = ({
+  Map<String, int> days,
+  Map<String, int> months,
+  Map<String, EntryLog> entries,
+});
+
+Map<String, int> _intMap(Object? m) => {
+      if (m is Map)
+        for (final e in m.entries)
+          if (e.value is num) '${e.key}': (e.value as num).toInt(),
+    };
+
+/// The chapters one title added to the daily counts, by local day.
+class EntryLog {
+  EntryLog({Map<String, int>? current, Map<String, int>? earlier})
+      : current = current ?? {},
+        earlier = earlier ?? {};
+
+  factory EntryLog.fromJson(Object? j) => j is Map
+      ? EntryLog(current: _intMap(j['cur']), earlier: _intMap(j['old']))
+      : EntryLog();
+
+  /// This read-through: lowering the chapter number takes from here.
+  final Map<String, int> current;
+
+  /// Finished read-throughs (before a reread was added): only deleting the
+  /// title takes these off.
+  final Map<String, int> earlier;
+
+  bool get isEmpty => current.isEmpty && earlier.isEmpty;
+
+  /// A reread was added: this read-through is done and stays counted.
+  void closeReadThrough() {
+    for (final e in current.entries) {
+      earlier[e.key] = (earlier[e.key] ?? 0) + e.value;
+    }
+    current.clear();
+  }
+
+  /// Takes up to [n] chapters back off this read-through, newest days
+  /// first. Returns what was taken, by day.
+  Map<String, int> takeBack(int n) {
+    final taken = <String, int>{};
+    final keys = current.keys.toList()..sort();
+    for (final k in keys.reversed) {
+      if (n <= 0) break;
+      final have = current[k]!;
+      final t = have < n ? have : n;
+      taken[k] = t;
+      n -= t;
+      if (have - t > 0) {
+        current[k] = have - t;
+      } else {
+        current.remove(k);
+      }
+    }
+    return taken;
+  }
+
+  Map<String, dynamic> toJson() => {'cur': current, 'old': earlier};
 }
 
 /// Random UUID v4 for new titles.

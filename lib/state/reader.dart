@@ -1,7 +1,8 @@
-  import 'dart:async';
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 
 import '../models/entry.dart';
 import '../models/reader.dart';
@@ -346,6 +347,66 @@ class ReadChaptersNotifier extends Notifier<Map<String, Set<String>>> {
 final readChaptersProvider =
     NotifierProvider<ReadChaptersNotifier, Map<String, Set<String>>>(
         ReadChaptersNotifier.new);
+
+// ---------------------------------------------------------------------------
+// Favorite chapters
+// ---------------------------------------------------------------------------
+
+/// Chapters you starred, per title (by the source's chapter key). Saved on
+/// the phone. Kept when the title is deleted (Undo brings it back as it
+/// was); a key that a new source doesn't use simply stops matching.
+class FavoriteChaptersNotifier extends Notifier<Map<String, Set<String>>> {
+  static const _key = 'favorite_chapters_v1';
+
+  @override
+  Map<String, Set<String>> build() {
+    final raw = ref.read(sharedPrefsProvider).getString(_key);
+    if (raw == null) return const {};
+    try {
+      final j = jsonDecode(raw);
+      if (j is! Map) return const {};
+      return {
+        for (final e in j.entries)
+          if (e.value is List)
+            '${e.key}': {
+              for (final k in e.value as List)
+                if (k is String) k,
+            },
+      };
+    } catch (_) {
+      return const {};
+    }
+  }
+
+  bool isFavorite(String entryId, String chapterKey) =>
+      state[entryId]?.contains(chapterKey) ?? false;
+
+  /// Stars or un-stars [chapterKey]. Returns whether it's a favorite now.
+  bool toggle(String entryId, String chapterKey) {
+    final next = {...state};
+    final keys = {...?next[entryId]};
+    final on = keys.add(chapterKey);
+    if (!on) keys.remove(chapterKey);
+    if (keys.isEmpty) {
+      next.remove(entryId);
+    } else {
+      next[entryId] = keys;
+    }
+    state = next;
+    unawaited(ref.read(sharedPrefsProvider).setString(_key,
+        jsonEncode({for (final e in next.entries) e.key: e.value.toList()})));
+    return on;
+  }
+}
+
+final favoriteChaptersProvider =
+    NotifierProvider<FavoriteChaptersNotifier, Map<String, Set<String>>>(
+        FavoriteChaptersNotifier.new);
+
+/// The chapter list of a title shows only its favorites (for this session;
+/// the app opens on the full list).
+final favoritesOnlyProvider =
+    StateProvider.family<bool, String>((ref, entryId) => false);
 
 // ---------------------------------------------------------------------------
 // Reading mode (paged right-to-left / left-to-right, long strip)

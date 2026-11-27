@@ -97,6 +97,77 @@ class MangaDexService {
     return data.cast<Map<String, dynamic>>().map(_toManga).toList();
   }
 
+  /// One series by id (for its cover), or null if MangaDex doesn't have it.
+  Future<SourceManga?> manga(String id) async {
+    final json = await _get('/manga/$id', {
+      'includes[]': ['cover_art'],
+    });
+    final data = json['data'];
+    return data is Map ? _toManga(data.cast<String, dynamic>()) : null;
+  }
+
+  Map<String, String>? _tagIds;
+
+  /// MangaDex's genre / theme tags: [normalizeTag]ged English name → id.
+  /// Loaded once per session.
+  Future<Map<String, String>> tagIds() async {
+    final cached = _tagIds;
+    if (cached != null) return cached;
+    final json = await _get('/manga/tag', const {});
+    final out = <String, String>{};
+    for (final t in (json['data'] as List?) ?? const []) {
+      if (t is! Map) continue;
+      final id = t['id'];
+      final names = (t['attributes'] as Map?)?['name'];
+      final en = names is Map ? names['en'] : null;
+      if (id is String && en is String) out[normalizeTag(en)] = id;
+    }
+    return _tagIds = out;
+  }
+
+  /// "Slice of Life" → "sliceoflife", to match tags and genre names.
+  static String normalizeTag(String s) =>
+      s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+  /// A Discover list: series ordered by [order] (a MangaDex order field,
+  /// e.g. `followedCount`, `rating`, `relevance`), optionally matching
+  /// [query] and having every tag in [tagIds]. Only series with chapters
+  /// in [language], and no adult content. [createdSince] keeps only series
+  /// added after that time (used for "trending").
+  Future<({List<SourceManga> manga, bool hasMore})> browse({
+    required String order,
+    String query = '',
+    List<String> tagIds = const [],
+    DateTime? createdSince,
+    int offset = 0,
+    int limit = 30,
+  }) async {
+    final q = query.trim();
+    String stamp(DateTime d) =>
+        d.toUtc().toIso8601String().split('.').first.replaceAll('Z', '');
+    final json = await _get('/manga', {
+      if (q.isNotEmpty) 'title': q,
+      'limit': '$limit',
+      'offset': '$offset',
+      'includes[]': ['cover_art'],
+      'contentRating[]': const ['safe', 'suggestive'],
+      'availableTranslatedLanguage[]': const [language],
+      'hasAvailableChapters': 'true',
+      'order[$order]': 'desc',
+      if (tagIds.isNotEmpty) 'includedTags[]': tagIds,
+      if (createdSince != null) 'createdAtSince': stamp(createdSince),
+    });
+    final data = (json['data'] as List?) ?? const [];
+    final total = (json['total'] as num?)?.toInt() ?? 0;
+    return (
+      manga: data.cast<Map<String, dynamic>>().map(_toManga).toList(),
+      // MangaDex stops paging at 10 000 results.
+      hasMore: offset + data.length < total &&
+          offset + limit < 10000 &&
+          data.isNotEmpty,
+    );
+  }
+
   /// Best match for [title]: an exact (normalised) title or alt-title match,
   /// otherwise null. Exact-only so a wrong series never gets linked silently.
   Future<SourceManga?> findExact(String title) async {

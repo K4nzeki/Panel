@@ -98,6 +98,11 @@ Future<bool> pickReadingSource(
     if (context.mounted) showSnack(context, friendlyError(e), error: true);
     return false;
   }
+  // No cover yet: take the one from the source it's now read from.
+  unawaited(ref
+      .read(entriesProvider.notifier)
+      .fillCoverFromSource(entry.id)
+      .catchError((_) {}));
   // Reading on MangaDex also turns on new-chapter alerts for it.
   if (picked.source.id == MangaDexSource.sourceId && !entry.isLinked) {
     unawaited(ref.read(entriesProvider.notifier).linkSource(
@@ -205,6 +210,12 @@ class _ChaptersBody extends ConsumerWidget {
     // A saved filter for a group that's gone would hide everything.
     final active = link.scanlators.where(counts.containsKey).toSet();
     final shown = filterByScanlator(list.chapters, active);
+    final favorites = ref.watch(favoriteChaptersProvider
+        .select((m) => m[entry.id] ?? const <String>{}));
+    final favoritesOnly = ref.watch(favoritesOnlyProvider(entry.id));
+    // What the list shows. Reading still moves through every chapter in
+    // [shown] (the favorites filter is only for finding chapters).
+    final visible = favoritesOnly ? filterFavorites(shown, favorites) : shown;
     final unread = [
       for (final ch in shown)
         if (ch.number == null || ch.number! > entry.chapter) ch,
@@ -348,10 +359,49 @@ class _ChaptersBody extends ConsumerWidget {
                   active: active,
                 ),
               ),
+            if (shown.isNotEmpty)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                  child: Wrap(spacing: 8, children: [
+                    FilterChip(
+                      avatar: Icon(
+                          favoritesOnly
+                              ? Icons.star_rounded
+                              : Icons.star_outline_rounded,
+                          size: 18,
+                          color: favoritesOnly ? c.primary : null),
+                      label: Text('Favorites  ${favorites.length}'),
+                      tooltip: 'Show only favorite chapters',
+                      selected: favoritesOnly,
+                      showCheckmark: false,
+                      onSelected: (v) => ref
+                          .read(favoritesOnlyProvider(entry.id).notifier)
+                          .state = v,
+                    ),
+                  ]),
+                ),
+              ),
             if (list.loading && list.chapters.isEmpty)
               const SliverFillRemaining(
                 hasScrollBody: false,
                 child: Center(child: CircularProgressIndicator()),
+              )
+            else if (shown.isNotEmpty && visible.isEmpty)
+              SliverFillRemaining(
+                hasScrollBody: false,
+                child: EmptyState(
+                  icon: Icons.star_outline_rounded,
+                  title: 'No favorite chapters',
+                  message: 'Tap the star next to a chapter (or in the '
+                      'reader) to add it here.',
+                  action: OutlinedButton(
+                    onPressed: () => ref
+                        .read(favoritesOnlyProvider(entry.id).notifier)
+                        .state = false,
+                    child: const Text('Show all chapters'),
+                  ),
+                ),
               )
             else if (shown.isEmpty)
               SliverFillRemaining(
@@ -375,11 +425,11 @@ class _ChaptersBody extends ConsumerWidget {
               SliverPadding(
                 padding: const EdgeInsets.fromLTRB(8, 4, 8, 96),
                 sliver: SliverList.builder(
-                  itemCount: shown.length,
+                  itemCount: visible.length,
                   itemBuilder: (_, i) => _ChapterTile(
                     entry: entry,
                     link: link,
-                    chapter: shown[i],
+                    chapter: visible[i],
                     shown: shown,
                     showGroup: groups.length > 1,
                   ),
@@ -492,6 +542,8 @@ class _ChapterTile extends ConsumerWidget {
         .select((m) => m[entry.id]?.contains(chapter.key) ?? false));
     final read = (n != null && n <= entry.chapter) || finished;
     final isLast = link.lastChapterKey == chapter.key;
+    final favorite = ref.watch(favoriteChaptersProvider
+        .select((m) => m[entry.id]?.contains(chapter.key) ?? false));
     // Just this chapter's download, so other chapters' progress doesn't
     // rebuild every tile in the list.
     final id = downloadId(entry.id, chapter.key);
@@ -572,6 +624,16 @@ class _ChapterTile extends ConsumerWidget {
       );
     }
 
+    final star = IconButton(
+      tooltip: favorite ? 'Remove from favorites' : 'Add to favorites',
+      visualDensity: VisualDensity.compact,
+      onPressed: () => ref
+          .read(favoriteChaptersProvider.notifier)
+          .toggle(entry.id, chapter.key),
+      icon: Icon(favorite ? Icons.star_rounded : Icons.star_outline_rounded,
+          color: favorite ? c.tertiary : c.onSurfaceVariant),
+    );
+
     final sub = [
       if (showGroup) chapter.scanlatorLabel,
       if (chapter.uploadedAt != null) relativeTime(chapter.uploadedAt!),
@@ -596,7 +658,10 @@ class _ChapterTile extends ConsumerWidget {
         ),
       ),
       subtitle: sub.isEmpty ? null : Text(sub, maxLines: 1, overflow: TextOverflow.ellipsis),
-      trailing: trailing,
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [star, trailing],
+      ),
     );
   }
 
@@ -609,6 +674,21 @@ class _ChapterTile extends ConsumerWidget {
       builder: (ctx) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ListTile(title: Text(chapter.name, maxLines: 2)),
+          Consumer(builder: (_, ref, _) {
+            final fav = ref.watch(favoriteChaptersProvider
+                .select((m) => m[entry.id]?.contains(chapter.key) ?? false));
+            return ListTile(
+              leading: Icon(
+                  fav ? Icons.star_rounded : Icons.star_outline_rounded),
+              title: Text(fav ? 'Remove from favorites' : 'Add to favorites'),
+              onTap: () {
+                Navigator.pop(ctx);
+                ref
+                    .read(favoriteChaptersProvider.notifier)
+                    .toggle(entry.id, chapter.key);
+              },
+            );
+          }),
           if (n != null && !read)
             ListTile(
               leading: const Icon(Icons.done_all_rounded),

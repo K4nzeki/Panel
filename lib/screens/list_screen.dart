@@ -9,6 +9,7 @@ import '../utils/dates.dart';
 import '../widgets/add_title_sheet.dart';
 import '../widgets/common.dart';
 import '../widgets/entry_card.dart';
+import '../widgets/updates_button.dart';
 
 /// Library tab (everything except To Read) and the To Read tab.
 class ListScreen extends ConsumerStatefulWidget {
@@ -68,9 +69,8 @@ class _ListScreenState extends ConsumerState<ListScreen> {
             _Header(tab: widget.tab, query: query, total: totalInTab),
             // Checking chapters, finding covers and downloads show as quiet
             // notifications; being offline is a small icon in the header
-            // plus a short toast when the connection drops.
-            if (_isLibrary && totalInTab > 0)
-              const SliverToBoxAdapter(child: _SummaryStrip()),
+            // plus a short toast when the connection drops. Reading /
+            // Finished / Chapters totals live on the Stats tab.
             if (totalInTab > 0) ...[
               SliverToBoxAdapter(
                 child: Padding(
@@ -293,6 +293,7 @@ class _Header extends ConsumerWidget {
         ],
       ),
       actions: [
+        const UpdatesButton(),
         if (!online)
           IconButton(
             tooltip: "Offline — tap to try again",
@@ -347,62 +348,6 @@ class _Header extends ConsumerWidget {
         const SizedBox(width: 8),
       ],
     );
-  }
-}
-
-/// Three quick numbers at the top of the library.
-class _SummaryStrip extends ConsumerWidget {
-  const _SummaryStrip();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final entries = ref.watch(entriesProvider).value ?? const <Entry>[];
-    final counts = ref.watch(statusCountsProvider);
-    final chapters = entries.fold<int>(0, (a, e) => a + e.chapter);
-    final sc = context.statusColors;
-
-    Widget tile(String label, String value, Color color, IconData icon) =>
-        Expanded(
-          child: Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.10),
-              borderRadius: BorderRadius.circular(18),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Icon(icon, size: 20, color: color),
-                const SizedBox(height: 10),
-                Text(value, style: context.text.titleLarge),
-                Text(label,
-                    style: context.text.labelSmall
-                        ?.copyWith(color: context.colors.onSurfaceVariant)),
-              ],
-            ),
-          ),
-        );
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-      child: Row(children: [
-        tile('Reading', '${counts[EntryStatus.reading]}',
-            sc.of(EntryStatus.reading), Icons.auto_stories_rounded),
-        const SizedBox(width: 10),
-        tile('Finished', '${counts[EntryStatus.finished]}',
-            sc.of(EntryStatus.finished), Icons.task_alt_rounded),
-        const SizedBox(width: 10),
-        tile('Chapters', _compact(chapters), context.colors.primary,
-            Icons.menu_book_rounded),
-      ]),
-    );
-  }
-
-  static String _compact(int n) {
-    if (n >= 1000000) return '${(n / 1000000).toStringAsFixed(1)}M';
-    if (n >= 10000) return '${(n / 1000).toStringAsFixed(0)}k';
-    if (n >= 1000) return '${(n / 1000).toStringAsFixed(1)}k';
-    return '$n';
   }
 }
 

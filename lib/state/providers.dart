@@ -18,6 +18,7 @@ import '../services/sources/reader_source.dart';
 import '../services/update_checker.dart';
 import '../utils/import_merge.dart';
 import 'inbox.dart';
+import 'reader.dart';
 
 // ---------------------------------------------------------------------------
 // Core services
@@ -339,6 +340,19 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     if (patch.containsKey('chapter')) {
       after = after.copyWith(lastReadAt: DateTime.now());
     }
+    // Rereads bank the chapters read so far, so Stats keeps them when the
+    // chapter count is cleared to start over (see withChapterAccounting).
+    if (patch.containsKey('chapter') || patch.containsKey('reread')) {
+      final counted = withChapterAccounting(before, after);
+      if (!identical(counted, after)) {
+        after = counted;
+        patch = {
+          ...patch,
+          'chapters_banked': after.chaptersBanked,
+          'reread_overlap': after.rereadOverlap,
+        };
+      }
+    }
     _set([
       for (final e in _current) e.id == before.id ? after : e,
     ]);
@@ -347,6 +361,9 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
       unawaited(HapticFeedback.mediumImpact());
     }
     await LocalStore.recordActivity(before, after, patch);
+    if (patch.containsKey('chapter') || patch.containsKey('reread')) {
+      _refreshStats();
+    }
   }
 
   Future<void> bumpChapter(Entry e, int by) async {
@@ -376,6 +393,23 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     await setChapter(e, number);
   }
 
+  /// Opening the reader: stamps "last read", and a To Read title you start
+  /// reading moves into your library (Reading) straight away, without
+  /// waiting for the first finished chapter.
+  Future<void> startReading(String entryId) async {
+    final e = _current.where((x) => x.id == entryId).firstOrNull;
+    if (e == null) return;
+    if (e.status != EntryStatus.toRead) {
+      touch(entryId);
+      return;
+    }
+    await save(
+      e,
+      e.copyWith(status: EntryStatus.reading, lastReadAt: DateTime.now()),
+      {'status': EntryStatus.reading.label},
+    );
+  }
+
   /// Just stamps "last read" (opening the reader counts as activity).
   void touch(String entryId) {
     _set([
@@ -397,20 +431,42 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     await save(e, optimistic, patch);
   }
 
-  /// Deletes [e] and returns it so the caller can offer "Undo".
+  /// What [remove] took off the Stats day counts, kept for "Undo".
+  final Map<String, EntryLog> _removedLogs = {};
+
+  /// Deletes [e] and returns it so the caller can offer "Undo". Its chapters
+  /// come off Stats too (the totals and the days they were read on).
   Future<Entry> remove(Entry e) async {
     _set(_current.where((x) => x.id != e.id).toList());
     unawaited(HapticFeedback.lightImpact());
+    try {
+      final log = await LocalStore.forgetEntry(e.id);
+      if (log != null) _removedLogs[e.id] = log;
+    } catch (_) {}
+    _refreshStats();
     return e;
   }
 
   /// Puts a deleted entry back exactly as it was (same id, so its reading
-  /// source, progress and downloads still match).
+  /// source, progress, downloads and Stats still match).
   Future<void> restore(Entry e) async {
     if (_current.any((x) => x.id == e.id)) return;
     final list = [..._current, e]
       ..sort((a, b) => a.position.compareTo(b.position));
     _set(list);
+    final log = _removedLogs.remove(e.id);
+    if (log != null) {
+      try {
+        await LocalStore.restoreEntry(e.id, log);
+      } catch (_) {}
+    }
+    _refreshStats();
+  }
+
+  /// The Stats charts read the day counts once; have them read again.
+  void _refreshStats() {
+    ref.invalidate(chaptersPerDayProvider);
+    ref.invalidate(completionsPerMonthProvider);
   }
 
   /// Moves [moved] to sit where [target] is, in the custom ("My order") sort.
@@ -489,6 +545,51 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
   bool _filling = false;
   bool _fillAgain = false;
 
+  /// Whether [e] is read from a source (a reading link, or linked to a
+  /// MangaDex series for new chapters).
+  bool _hasSource(Entry e) =>
+      ref.read(readingLinksProvider).containsKey(e.id) ||
+      MangaDexService.idFrom(e.sourceId) != null;
+
+  /// The cover of [e] on the source it's read from, or null.
+  Future<String?> _coverFromCurrentSource(Entry e) async {
+    try {
+      final link = ref.read(readingLinksProvider)[e.id];
+      if (link != null) {
+        final source = ref.read(readerSourcesProvider).forLink(link);
+        final found = await SourceCovers.find(source, link.seriesKey, e.title);
+        if (found != null) return found;
+      }
+      final md = MangaDexService.idFrom(e.sourceId);
+      if (md != null) {
+        final url = (await ref.read(mangaDexProvider).manga(md))?.coverUrl;
+        if (url != null && url.trim().isNotEmpty) return url;
+      }
+    } catch (err) {
+      if ((err is SourceException && err.offline) || isConnectionProblem(err)) {
+        _setOnline(false);
+      }
+    }
+    return null;
+  }
+
+  /// A title just got a reading source: if it has no cover yet, use the
+  /// one from that source right away.
+  Future<void> fillCoverFromSource(String entryId) async {
+    bool missing(Entry? e) =>
+        e != null && (e.coverUrl == null || e.coverUrl!.trim().isEmpty);
+    final e = _current.where((x) => x.id == entryId).firstOrNull;
+    if (!missing(e)) return;
+    final cover = await _coverFromCurrentSource(e!);
+    if (cover == null || !ref.mounted) return;
+    final now = _current.where((x) => x.id == entryId).firstOrNull;
+    if (!missing(now)) return;
+    _set([
+      for (final x in _current)
+        x.id == entryId ? x.copyWith(coverUrl: Nullable(cover)) : x,
+    ]);
+  }
+
   /// Titles already looked up this session that AniList had no cover for,
   /// so every refresh doesn't search for them again.
   final Set<String> _noCoverFound = {};
@@ -522,7 +623,7 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     }
     bool needsCover(Entry e) =>
         (e.coverUrl == null || e.coverUrl!.trim().isEmpty) &&
-        (e.type != EntryType.comic || ext.isNotEmpty) &&
+        (e.type != EntryType.comic || ext.isNotEmpty || _hasSource(e)) &&
         !_noCoverFound.contains(titleKey(e.title));
 
     final todo = _current.where(needsCover).map((e) => e.id).toList();
@@ -547,8 +648,9 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
         final e = _current.where((x) => x.id == todo[i]).firstOrNull;
         if (e != null && needsCover(e)) {
           SearchResult? match;
-          String? cover;
-          if (e.type != EntryType.comic) {
+          // First the source you read it from: it's the exact series.
+          var cover = await _coverFromCurrentSource(e);
+          if ((cover == null || cover.isEmpty) && e.type != EntryType.comic) {
             try {
               match = await anilist.lookup(e.title);
               busyRetries = 0;

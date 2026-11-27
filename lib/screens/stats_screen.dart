@@ -7,6 +7,7 @@ import '../state/providers.dart';
 import '../theme.dart';
 import '../widgets/bar_chart.dart';
 import '../widgets/common.dart';
+import '../widgets/updates_button.dart';
 
 class StatsScreen extends ConsumerWidget {
   const StatsScreen({super.key});
@@ -20,7 +21,9 @@ class StatsScreen extends ConsumerWidget {
     final c = context.colors;
     final sc = context.statusColors;
 
-    final chapters = entries.fold<int>(0, (a, e) => a + e.chapter);
+    // Every title's chapters, earlier read-throughs included: deleting a
+    // title or lowering its chapter takes them off; a reread keeps them.
+    final chapters = entries.fold<int>(0, (a, e) => a + e.chaptersCounted);
     final rereads = entries.fold<int>(0, (a, e) => a + e.reread);
     final byType = {for (final t in EntryType.values) t: 0};
     for (final e in entries) {
@@ -55,6 +58,7 @@ class StatsScreen extends ConsumerWidget {
                   Text('Stats', style: context.text.headlineSmall),
                 ],
               ),
+              actions: const [UpdatesButton(), SizedBox(width: 8)],
             ),
             SliverPadding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 32),

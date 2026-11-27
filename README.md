@@ -34,7 +34,22 @@ from it. The format is `MAJOR.MINOR.PATCH+BUILD`. Bump it in every release:
   Android refuses to install an update whose build number isn't higher than
   the installed one.
 
-Current: **2.3.0+14**. New: the reader loads every page of a chapter in
+Current: **2.4.0+15**. New: Updates moved from the bottom bar to a bell
+at the top of Library, To Read, Discover and Stats; Discover browses and
+searches **all** your sources at once (MangaDex and installed extensions,
+replacing the AniList view) with Trending / Popular / Top on every source,
+a genre filter, a scroll-to-top button, and long-press (or the preview's
+"Remove from list") to remove a title; chapters can be starred as
+favorites and the chapter list filtered to them; opening the reader on a
+To Read title moves it into your library; titles with no cover take the
+one from the source they're read from; a Legal terms & disclaimer page
+(Settings → About, also shown once on first run). Stats: deleting a title
+or lowering its chapter count takes those chapters off (the totals and the
+daily chart), while adding a reread and clearing the count keeps the
+chapters already read. The Reading / Finished / Chapters cards above the
+library were removed (they're on Stats).
+
+Previous: **2.3.0+14** — the reader loads every page of a chapter in
 the background as soon as you open it, so pages are ready before you reach
 them; finishing a chapter records it as read exactly once (and marks
 chapters without a number as read too); covers are decoded at the size

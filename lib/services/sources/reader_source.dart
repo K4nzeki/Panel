@@ -31,6 +31,72 @@ abstract class ReaderSource {
   Future<List<String>> pages(ChapterInfo chapter);
 }
 
+/// The quick lists every source can show in Discover.
+enum BrowseSort {
+  trending('Trending'),
+  popular('Popular'),
+  top('Top');
+
+  const BrowseSort(this.label);
+  final String label;
+}
+
+/// Genres offered as a Discover filter. Each source matches them against
+/// its own genre / tag names (case and punctuation don't matter).
+const browseGenres = [
+  'Action',
+  'Adventure',
+  'Comedy',
+  'Drama',
+  'Fantasy',
+  'Horror',
+  'Isekai',
+  'Martial Arts',
+  'Mystery',
+  'Psychological',
+  'Romance',
+  'School Life',
+  'Sci-Fi',
+  'Slice of Life',
+  'Sports',
+  'Supernatural',
+  'Thriller',
+  'Tragedy',
+];
+
+/// "Slice of Life" == "slice-of-life" == "Slice of life".
+String genreKey(String s) => s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+/// One page of a Discover list.
+class BrowsePage {
+  const BrowsePage(this.series,
+      {this.hasNextPage = false, this.genreApplied = true});
+
+  final List<SourceSeries> series;
+  final bool hasNextPage;
+
+  /// False when a genre was asked for but this source has no way to filter
+  /// by it (the list is then unfiltered, and Discover leaves it out).
+  final bool genreApplied;
+}
+
+/// A source Discover can list: [BrowseSort] lists, search, and a genre
+/// filter, page by page ([page] starts at 1).
+abstract interface class BrowsableSource {
+  Future<BrowsePage> browse({
+    BrowseSort sort = BrowseSort.popular,
+    String query = '',
+    String? genre,
+    int page = 1,
+  });
+}
+
+/// A source that can tell the cover of one of its series.
+abstract interface class CoverSource {
+  /// The cover of [seriesKey] (named [title] in your list), or null.
+  Future<String?> seriesCover(String seriesKey, {String? title});
+}
+
 /// A friendly message about a source that didn't work.
 class SourceException implements Exception {
   const SourceException(this.message, {this.offline = false});

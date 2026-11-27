@@ -18,6 +18,7 @@ import '../widgets/common.dart';
 import '../widgets/entry_sheet.dart';
 import '../widgets/update_dialog.dart';
 import 'extension_store_screen.dart';
+import 'legal_screen.dart';
 
 /// Settings tab. Panel has no accounts: everything here is saved on this
 /// phone only.
@@ -204,6 +205,14 @@ class ProfileScreen extends ConsumerWidget {
                     subtitle: const Text(AppConfig.supportEmail),
                     onTap: () => launchUrl(
                         Uri.parse('mailto:${AppConfig.supportEmail}')),
+                  ),
+                  const Divider(indent: 16, endIndent: 16),
+                  ListTile(
+                    leading: const Icon(Icons.gavel_rounded),
+                    title: const Text('Legal terms & disclaimer'),
+                    subtitle: const Text(
+                        'Third-party sources, your responsibility, no warranty'),
+                    onTap: () => openLegalTerms(context),
                   ),
                 ]),
               ),

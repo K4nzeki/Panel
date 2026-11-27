@@ -20,7 +20,7 @@ import 'sites/site_adapter.dart';
 ///
 /// Website sources have no scanlator list per chapter, so each chapter's
 /// "scanlator" is the site itself.
-class SiteSource implements ReaderSource {
+class SiteSource implements ReaderSource, BrowsableSource, CoverSource {
   SiteSource({
     required this.name,
     required this.lang,
@@ -151,6 +151,148 @@ class SiteSource implements ReaderSource {
     throw SourceException(unsupportedReason ??
         "$name uses its own site layout, which Panel can't read yet. "
             'Try another source.');
+  }
+
+  // ---- Discover lists ----
+
+  /// The theme whose list pages worked last time ('madara' / 'themesia').
+  String? _theme;
+
+  @override
+  Future<BrowsePage> browse({
+    BrowseSort sort = BrowseSort.popular,
+    String query = '',
+    String? genre,
+    int page = 1,
+  }) async {
+    final q = query.trim();
+    if (_adapter case final a?) {
+      // Sites with their own reader can only be searched.
+      if (q.isEmpty) {
+        throw SourceException(
+            "$name can't list its titles here. Search it by title instead.");
+      }
+      return page == 1
+          ? BrowsePage(await a.search(this, q), genreApplied: genre == null)
+          : const BrowsePage([]);
+    }
+    if (q.isNotEmpty && genre == null) {
+      // A plain search: one page, the site's own relevance order.
+      return page == 1 ? BrowsePage(await search(q)) : const BrowsePage([]);
+    }
+    final slug = genre == null ? null : genreSlug(genre);
+    final tries = <(String, Uri)>[
+      if (_theme != 'themesia')
+        ('madara', madaraListUrl(base, sort, page: page, genre: slug, query: q)),
+      if (_theme != 'madara')
+        ('themesia',
+            themesiaListUrl(base, sort, page: page, genre: slug, query: q)),
+    ];
+    SourceException? last;
+    var recognized = false;
+    for (final (theme, uri) in tries) {
+      try {
+        final doc = await _page(uri);
+        final found = parseSearch(doc, uri);
+        if (found.isNotEmpty) {
+          _theme = theme;
+          return BrowsePage(found,
+              hasNextPage: hasNextPage(doc) || found.length >= 12);
+        }
+        if (isSupportedSite(doc)) recognized = true;
+      } on SourceException catch (e) {
+        if (e.offline) rethrow;
+        last = e;
+      }
+    }
+    if (recognized) return const BrowsePage([]);
+    if (last != null) throw last;
+    throw SourceException(unsupportedReason ??
+        "$name uses its own site layout, which Panel can't list yet. "
+            'Try another source.');
+  }
+
+  /// "Slice of Life" → "slice-of-life" (WordPress genre slugs).
+  static String genreSlug(String genre) => genre
+      .trim()
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+      .replaceAll(RegExp(r'^-|-$'), '');
+
+  /// A Madara list page: `/manga/?m_orderby=…`, a genre's page, or a
+  /// search. Public for tests.
+  static Uri madaraListUrl(String base, BrowseSort sort,
+      {int page = 1, String? genre, String query = ''}) {
+    final order = switch (sort) {
+      BrowseSort.trending => 'trending',
+      BrowseSort.popular => 'views',
+      BrowseSort.top => 'rating',
+    };
+    final paged = page > 1 ? 'page/$page/' : '';
+    if (query.isNotEmpty) {
+      return Uri.parse('$base/$paged').replace(queryParameters: {
+        's': query,
+        'post_type': 'wp-manga',
+        'm_orderby': order,
+        if (genre != null) 'genre[]': genre,
+      });
+    }
+    final path = genre == null ? '$base/manga/$paged' : '$base/manga-genre/$genre/$paged';
+    return Uri.parse(path).replace(queryParameters: {'m_orderby': order});
+  }
+
+  /// A MangaThemesia list page: `/manga/?order=…&genre[]=…`. Public for
+  /// tests.
+  static Uri themesiaListUrl(String base, BrowseSort sort,
+      {int page = 1, String? genre, String query = ''}) {
+    final order = switch (sort) {
+      BrowseSort.trending => 'update',
+      BrowseSort.popular => 'popular',
+      BrowseSort.top => 'rating',
+    };
+    return Uri.parse('$base/manga/').replace(queryParameters: {
+      'page': '$page',
+      'order': order,
+      if (genre != null) 'genre[]': genre,
+      if (query.isNotEmpty) 'title': query,
+    });
+  }
+
+  /// Whether a list page links to a next page.
+  static bool hasNextPage(dom.Document doc) =>
+      doc.querySelector('a.nextpostslink, a.next.page-numbers, '
+          '.nav-previous a, .hpage a.r, .pagination a.next, link[rel=next]') !=
+      null;
+
+  // ---- Cover ----
+
+  @override
+  Future<String?> seriesCover(String seriesKey, {String? title}) async {
+    if (_adapter case final a?) {
+      final t = title?.trim() ?? '';
+      if (t.isEmpty) return null;
+      final found = await a.search(this, t);
+      return found.where((s) => s.key == seriesKey).firstOrNull?.coverUrl;
+    }
+    final uri = Uri.tryParse(seriesKey);
+    if (uri == null || !uri.hasScheme) return null;
+    return parseSeriesCover(await _page(uri), uri);
+  }
+
+  /// The cover on a series page (Madara, MangaThemesia, or the page's
+  /// share image). Public for tests.
+  static String? parseSeriesCover(dom.Document doc, Uri page) {
+    final img = doc.querySelector('.summary_image img, .tab-summary img, '
+        '.thumb img, .seriestucontl img, .infomanga img, .ime img');
+    final fromImg = img == null ? null : imageUrl(img, page);
+    if (fromImg != null) return fromImg;
+    final og = doc
+        .querySelector('meta[property="og:image"]')
+        ?.attributes['content']
+        ?.trim();
+    if (og == null || og.isEmpty) return null;
+    final abs = page.resolve(og);
+    return abs.isScheme('http') || abs.isScheme('https') ? '$abs' : null;
   }
 
   /// Whether a page comes from a site theme Panel can read (Madara or

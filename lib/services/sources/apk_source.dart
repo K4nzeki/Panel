@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/services.dart';
 
 import '../../models/reader.dart';
+import '../mangadex.dart' show normalizeTitle;
 import 'reader_source.dart';
 
 /// A source from a Mihon / Tachiyomi extension installed on the phone, run
@@ -15,7 +16,7 @@ import 'reader_source.dart';
 /// A series' key is the extension's own manga url and a chapter's key its
 /// chapter url (relative to the site, as Mihon stores them). Page "urls" are
 /// tokens for [fetchImage], which loads them with the extension's own client.
-class ApkSource implements ReaderSource, ImageFetcher {
+class ApkSource implements ReaderSource, ImageFetcher, BrowsableSource, CoverSource {
   ApkSource({
     required this.sourceId,
     required this.name,
@@ -126,6 +127,141 @@ class ApkSource implements ReaderSource, ImageFetcher {
   Future<List<Map<Object?, Object?>>> filters() async {
     final raw = await _call('getFilterList', {'sourceId': sourceId});
     return [for (final f in (raw as List?) ?? const []) if (f is Map) f];
+  }
+
+  /// Filters per source, asked once per session.
+  static final _filterCache = <String, List<Map<Object?, Object?>>>{};
+
+  Future<List<Map<Object?, Object?>>> _cachedFilters() async {
+    final hit = _filterCache[sourceId];
+    if (hit != null) return hit;
+    try {
+      return _filterCache[sourceId] = await filters();
+    } on SourceException catch (e) {
+      if (e.offline) rethrow;
+      return const []; // no filters: lists still work, unfiltered
+    }
+  }
+
+  @override
+  Future<BrowsePage> browse({
+    BrowseSort sort = BrowseSort.popular,
+    String query = '',
+    String? genre,
+    int page = 1,
+  }) async {
+    final q = query.trim();
+    // The extension's own lists, when nothing else is asked for.
+    if (q.isEmpty && genre == null && sort != BrowseSort.top) {
+      final p = sort == BrowseSort.trending && supportsLatest
+          ? await latest(page: page)
+          : await popular(page: page);
+      return BrowsePage(p.series,
+          hasNextPage: p.hasNextPage && p.series.isNotEmpty);
+    }
+    final st = filterStates(await _cachedFilters(), genre: genre, sort: sort);
+    if (q.isEmpty && !st.genre && !st.sort) {
+      // No filter to sort or pick a genre with: the popular list.
+      final p = await popular(page: page);
+      return BrowsePage(p.series,
+          hasNextPage: p.hasNextPage && p.series.isNotEmpty,
+          genreApplied: genre == null);
+    }
+    final p = await searchPage(q,
+        page: page, filters: st.genre || st.sort ? st.states : null);
+    return BrowsePage(p.series,
+        hasNextPage: p.hasNextPage && p.series.isNotEmpty,
+        genreApplied: genre == null || st.genre);
+  }
+
+  /// Filter states (see [searchPage]) that pick [genre] and the order for
+  /// [sort], from a source's [filters]. [genre] / [sort] in the result say
+  /// whether a filter for them was found. Public for tests.
+  static ({List<Object?> states, bool genre, bool sort}) filterStates(
+      List<Map<Object?, Object?>> filters,
+      {String? genre,
+      BrowseSort? sort}) {
+    final states = List<Object?>.filled(filters.length, null);
+    final want = genre == null ? null : genreKey(genre);
+    var genreDone = want == null, sortDone = sort == null;
+    List<String> values(Map f) =>
+        [for (final v in (f['values'] as List?) ?? const []) '$v'];
+
+    for (var i = 0; i < filters.length; i++) {
+      final f = filters[i];
+      final type = f['type'];
+      final name = genreKey('${f['name'] ?? ''}');
+      if (type == 'group' && !genreDone) {
+        final children = (f['filters'] as List?) ?? const [];
+        final j = children.indexWhere((c) =>
+            c is Map &&
+            (c['type'] == 'checkbox' || c['type'] == 'tristate') &&
+            genreKey('${c['name'] ?? ''}') == want);
+        if (j >= 0) {
+          final child = List<Object?>.filled(children.length, null);
+          // Checkbox on, or tristate "include" (1).
+          child[j] = (children[j] as Map)['type'] == 'checkbox' ? true : 1;
+          states[i] = child;
+          genreDone = true;
+        }
+      } else if (type == 'select') {
+        final vs = values(f);
+        if (!genreDone && name.contains('genre')) {
+          final j = vs.indexWhere((v) => genreKey(v) == want);
+          if (j >= 0) {
+            states[i] = j;
+            genreDone = true;
+            continue;
+          }
+        }
+        if (!sortDone && (name.contains('sort') || name.contains('order'))) {
+          final j = sortIndex(vs, sort!);
+          if (j >= 0) {
+            states[i] = j;
+            sortDone = true;
+          }
+        }
+      } else if (type == 'sort' && !sortDone) {
+        final j = sortIndex(values(f), sort!);
+        if (j >= 0) {
+          states[i] = {'index': j, 'ascending': false};
+          sortDone = true;
+        }
+      }
+    }
+    return (
+      states: states,
+      genre: genre != null && genreDone,
+      sort: sort != null && sortDone,
+    );
+  }
+
+  /// The option in a sort filter's [values] that best fits [sort], or -1.
+  static int sortIndex(List<String> values, BrowseSort sort) {
+    final words = switch (sort) {
+      BrowseSort.trending => const ['trend', 'hot', 'latest', 'update', 'new'],
+      BrowseSort.popular => const ['popular', 'view', 'follow', 'read', 'bookmark'],
+      BrowseSort.top => const ['rating', 'rated', 'score', 'top', 'rank', 'best'],
+    };
+    final lower = [for (final v in values) v.toLowerCase()];
+    for (final w in words) {
+      final i = lower.indexWhere((v) => v.contains(w));
+      if (i >= 0) return i;
+    }
+    return -1;
+  }
+
+  @override
+  Future<String?> seriesCover(String seriesKey, {String? title}) async {
+    final t = title?.trim() ?? '';
+    if (t.isEmpty) return null;
+    final found = (await searchPage(t)).series;
+    final k = normalizeTitle(t);
+    final match = found.where((s) => s.key == seriesKey).firstOrNull ??
+        (k.isEmpty
+            ? null
+            : found.where((s) => normalizeTitle(s.title) == k).firstOrNull);
+    return match?.coverUrl;
   }
 
   Future<ApkMangasPage> _page(Map<String, Object?> args) async {
