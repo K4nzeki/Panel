@@ -23,6 +23,12 @@ internal class DelegateLastPathClassLoader(
 
     private val bootClassLoader: ClassLoader? = Any::class.java.classLoader
 
+    /** Whether [className] was loaded from this extension's own APK. */
+    fun owns(className: String): Boolean {
+        val c = findLoadedClass(className) ?: return false
+        return c.classLoader === this
+    }
+
     override fun loadClass(name: String?, resolve: Boolean): Class<*> {
         findLoadedClass(name)?.let { return it }
 

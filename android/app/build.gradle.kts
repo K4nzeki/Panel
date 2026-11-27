@@ -94,6 +94,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-protobuf:1.13.0")
     implementation("com.squareup.okhttp3:okhttp:5.5.1")
     implementation("com.squareup.okhttp3:okhttp-brotli:5.5.1")
+    // Newer extensions (keiyoushi builds, e.g. Asura Scans) add
+    // CompressionInterceptor(Zstd, ...) and crash with NoClassDefFoundError
+    // okhttp3.zstd.Zstd when the host doesn't ship it. Mihon ships it too.
+    implementation("com.squareup.okhttp3:okhttp-zstd:5.5.1")
     implementation("com.squareup.okio:okio:3.18.2")
     implementation("org.jsoup:jsoup:1.24.1")
     implementation("io.reactivex:rxjava:1.3.8")

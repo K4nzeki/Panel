@@ -60,6 +60,9 @@ object PanelInjekt {
         }
         RxJavaHooks.setOnError { e -> Log.w("PanelExt", "Undeliverable extension error", e) }
 
+        // Extensions' own background threads/coroutines: see ExtensionCrashGuard.
+        ExtensionCrashGuard.install()
+
         initialized = true
     }
 }

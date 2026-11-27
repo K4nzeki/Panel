@@ -34,8 +34,9 @@ from it. The format is `MAJOR.MINOR.PATCH+BUILD`. Bump it in every release:
   Android refuses to install an update whose build number isn't higher than
   the installed one.
 
-Current: **2.1.1+12** (fixed the "Choose another source" crash and the "uses
-its own site layout" error for downloaded extensions).
+Current: **2.1.1+12** (fixed the "Choose another source" crash, the "uses
+its own site layout" error for downloaded extensions, and crashes from
+extensions that need zstd, like Asura Scans).
 
 ## No account needed (2.0)
 

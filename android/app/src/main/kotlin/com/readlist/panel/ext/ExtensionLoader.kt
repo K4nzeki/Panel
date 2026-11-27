@@ -235,6 +235,7 @@ internal object ExtensionLoader {
         if (sourceClasses.isNullOrBlank()) return fail(pkgInfo, extName, "Malformed extension (no source class)")
 
         val classLoader = DelegateLastPathClassLoader(appInfo.sourceDir, null, context.classLoader)
+        ExtensionCrashGuard.register(classLoader)
 
         val sources = sourceClasses
             .split(";")

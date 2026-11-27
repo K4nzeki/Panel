@@ -14,6 +14,8 @@
 -keep,allowoptimization class kotlinx.serialization.** { public protected *; }
 -keep,allowoptimization class okhttp3.** { public protected *; }
 -keep,allowoptimization class okio.** { public protected *; }
+# zstd for okhttp-zstd: called from native code (JNI), so names must stay.
+-keep class com.squareup.zstd.** { *; }
 -keep,allowoptimization class org.jsoup.** { public protected *; }
 -keep,allowoptimization class rx.** { public protected *; }
 -keep,allowoptimization class uy.kohesive.injekt.** { public protected *; }
