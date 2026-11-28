@@ -26,7 +26,7 @@ from it. The format is `MAJOR.MINOR.PATCH+BUILD`. Bump it in every release:
 |---|---|---|
 | Major update: big redesign, breaking change (old data or links need migrating) | +1.0.0 | 3.0.0+13 |
 | Minor update: a new feature | +0.1.0 | 2.2.0+13 |
-| Bugs fixed only | +0.0.1 | 2.1.2+13 |
+| Bugs & erros fixed only | +0.0.1 | 2.1.2+13 |
 
 - A bigger bump resets the numbers after it to 0 (2.1.1 → 2.2.0, not 2.2.1).
 - If a release has a mix of changes, use the biggest one.
