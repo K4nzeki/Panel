@@ -52,9 +52,10 @@ void main() {
     CoverCache.client = MockClient((_) async => http.Response('', 404));
     const url = 'https://site.test/covers/missing.jpg';
 
+    await tester.pumpWidget(wrap(const CoverImage(
+        url: url, title: 'omniscient reader', width: 60, height: 90)));
+    // Let the (fake) download finish outside the test's fake clock.
     await tester.runAsync(() async {
-      await tester.pumpWidget(wrap(const CoverImage(
-          url: url, title: 'omniscient reader', width: 60, height: 90)));
       try {
         await CoverCache.bytes(url);
       } catch (_) {}
