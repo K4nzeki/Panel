@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -87,7 +89,11 @@ class CoverImage extends ConsumerWidget {
         fit: BoxFit.cover,
         cacheWidth: cacheWidth,
         gaplessPlayback: true,
-        errorBuilder: (_, _, _) => placeholder,
+        errorBuilder: (_, _, _) {
+          // The saved copy can't be shown: drop it so it downloads again.
+          unawaited(CoverCache.forget(u));
+          return placeholder;
+        },
         frameBuilder: frame,
       );
     }

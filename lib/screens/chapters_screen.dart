@@ -98,10 +98,11 @@ Future<bool> pickReadingSource(
     if (context.mounted) showSnack(context, friendlyError(e), error: true);
     return false;
   }
-  // No cover yet: take the one from the source it's now read from.
+  // No cover yet (or a broken one): take the one from the source it's now
+  // read from — the picker already showed it, so no extra lookup.
   unawaited(ref
       .read(entriesProvider.notifier)
-      .fillCoverFromSource(entry.id)
+      .fillCoverFromSource(entry.id, known: picked.series.coverUrl)
       .catchError((_) {}));
   // Reading on MangaDex also turns on new-chapter alerts for it.
   if (picked.source.id == MangaDexSource.sourceId && !entry.isLinked) {

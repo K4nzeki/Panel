@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../models/entry.dart';
 import '../models/reader.dart';
+import '../services/cover_cache.dart';
 import '../screens/extension_store_screen.dart' show langName;
 import '../services/sources/reader_source.dart';
 import '../state/language_filter.dart';
@@ -92,7 +93,11 @@ class _SourcePickerScreenState extends ConsumerState<SourcePickerScreen> {
   /// future) shows its error in its row rather than breaking the screen.
   static Future<List<SourceSeries>> _safeSearch(ReaderSource s, String q) {
     try {
-      return s.search(q);
+      return s.search(q).then((found) {
+        // Covers from this source load with its headers (Referer…).
+        CoverCache.useReaderSource(s, [for (final x in found) x.coverUrl]);
+        return found;
+      });
     } catch (e, st) {
       return Future.error(e, st);
     }

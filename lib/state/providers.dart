@@ -14,6 +14,7 @@ import '../services/cover_cache.dart';
 import '../services/extension_covers.dart';
 import '../services/local_store.dart';
 import '../services/mangadex.dart';
+import '../services/sources/mangadex_source.dart';
 import '../services/sources/reader_source.dart';
 import '../services/update_checker.dart';
 import '../utils/import_merge.dart';
@@ -80,6 +81,30 @@ final onlineProvider = StateProvider<bool>((ref) => true);
 final coverFillProvider =
     StateProvider<({int done, int total})?>((ref) => null);
 
+/// Whether a title's cover should be looked up (again):
+/// - it has none, or
+/// - the cover link turned out broken ([broken], from [CoverCache]), or
+/// - it's linked to MangaDex series [mangaDexId] and its MangaDex cover
+///   link can't be right (wrong series, no file name, malformed).
+///
+/// A cover from elsewhere (AniList, a site, one you picked) on a
+/// MangaDex-linked title is left alone unless it's broken.
+bool coverNeedsLookup(Entry e, {String? mangaDexId, bool broken = false}) {
+  final u = e.coverUrl?.trim() ?? '';
+  if (u.isEmpty || broken) return true;
+  if (mangaDexId == null) return false;
+  return MangaDexService.repairCoverUrl(u, mangaDexId) == null;
+}
+
+/// [e]'s MangaDex cover link fixed without asking MangaDex (old link forms,
+/// a doubled size suffix…), or null when there's nothing to fix that way.
+String? repairedMangaDexCover(Entry e, String mangaDexId) {
+  final u = e.coverUrl?.trim() ?? '';
+  if (u.isEmpty) return null;
+  final fixed = MangaDexService.repairCoverUrl(u, mangaDexId);
+  return (fixed == null || fixed == u) ? null : fixed;
+}
+
 /// The list, saved on the phone only (see [LocalStore]). Every change is
 /// saved straight away and works with no connection. Online extras — new
 /// chapter checks and missing covers — run when the app opens, when it
@@ -98,10 +123,27 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
 
     // Fold in what the background job found while the app was closed.
     // (Patches hold absolute values, so applying one twice is harmless.)
-    final saved = LocalStore.applyPatches(await LocalStore.readEntries(),
+    var saved = LocalStore.applyPatches(await LocalStore.readEntries(),
         await LocalStore.takeBackgroundPatches());
+    saved = _repairCoverLinks(saved);
     unawaited(LocalStore.writeEntries(saved));
     _saveCovers(saved);
+    // A cover that turns out broken (removed from the site, wrong link) is
+    // looked up again from the title's source.
+    void onBroken(String url) {
+      if (!ref.mounted) return;
+      if (!_current.any((e) => e.coverUrl?.trim() == url)) return;
+      _brokenTimer?.cancel();
+      _brokenTimer = Timer(const Duration(seconds: 2), () {
+        if (ref.mounted) unawaited(fillMissingCovers());
+      });
+    }
+
+    CoverCache.onBroken = onBroken;
+    ref.onDispose(() {
+      _brokenTimer?.cancel();
+      if (CoverCache.onBroken == onBroken) CoverCache.onBroken = null;
+    });
     // After the list is on screen: covers and the new-chapter check. A
     // short wait lets the first frames draw before network and JSON work
     // compete with them.
@@ -120,6 +162,74 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
   }
 
   String _coverUrls = '';
+  Timer? _brokenTimer;
+
+  /// The reading links the cover headers were last worked out from.
+  Map<String, Object?>? _linksSeen;
+
+  Map<String, Object?>? _readLinks() {
+    try {
+      return ref.read(readingLinksProvider);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Fixes MangaDex cover links that can be fixed without a lookup (forms
+  /// older versions saved). Ones that can't are looked up by
+  /// [fillMissingCovers].
+  List<Entry> _repairCoverLinks(List<Entry> list) {
+    var changed = false;
+    final out = <Entry>[];
+    for (final e in list) {
+      final md = _mangaDexIdOf(e);
+      final fixed = md == null ? null : repairedMangaDexCover(e, md);
+      if (fixed == null) {
+        out.add(e);
+      } else {
+        changed = true;
+        out.add(e.copyWith(coverUrl: Nullable(fixed)));
+      }
+    }
+    return changed ? out : list;
+  }
+
+  /// The MangaDex series [e] is linked to: as its reading source, or for
+  /// new chapters. The reading link comes first: covers of titles read on MangaDex come
+  /// from that series.
+  String? _mangaDexIdOf(Entry e) {
+    try {
+      final link = ref.read(readingLinksProvider)[e.id];
+      if (link != null && link.sourceId == MangaDexSource.sourceId) {
+        final key = link.seriesKey.trim();
+        if (key.isNotEmpty) return key;
+      }
+    } catch (_) {}
+    final id = MangaDexService.idFrom(e.sourceId)?.trim() ?? '';
+    return id.isEmpty ? null : id;
+  }
+
+  /// Tells [CoverCache] which headers the covers of titles read from a
+  /// website or extension need (their Referer, the extension's client), so
+  /// they download — and show — after a restart too.
+  void _rememberCoverSources(List<Entry> list) {
+    try {
+      final links = ref.read(readingLinksProvider);
+      if (links.isEmpty) return;
+      _linksSeen = links;
+      ReaderSourceRegistry? registry;
+      for (final e in list) {
+        final link = links[e.id];
+        final url = e.coverUrl?.trim() ?? '';
+        if (link == null || url.isEmpty) continue;
+        if (link.sourceId == MangaDexSource.sourceId) continue;
+        registry ??= ref.read(readerSourcesProvider);
+        CoverCache.useReaderSource(registry.forLink(link), [url]);
+      }
+    } catch (_) {
+      // Sources not ready yet: covers still load with the default headers.
+    }
+  }
 
   /// Saves the covers of every title in the list on the phone, so they show
   /// offline. Only runs when a cover was added or changed (or [force], e.g.
@@ -127,6 +237,8 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
   void _saveCovers(List<Entry> list, {bool force = false}) {
     final urls = [for (final e in list) e.coverUrl ?? ''];
     final key = urls.join('\n');
+    final linksChanged = !identical(_linksSeen, _readLinks());
+    if (force || key != _coverUrls || linksChanged) _rememberCoverSources(list);
     if (!force && key == _coverUrls) return;
     _coverUrls = key;
     unawaited(CoverCache.prefetch(urls));
@@ -232,22 +344,35 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     try {
       latest = await ref.read(mangaDexProvider).latestChapter(m.id);
     } catch (_) {}
+    if (!ref.mounted) return;
+    // The title may have changed while MangaDex answered (a cover found from
+    // the reading source, a chapter read): build on what it is now, so
+    // nothing found meanwhile is overwritten.
+    final cur = _current.where((x) => x.id == e.id).firstOrNull;
+    if (cur == null) return; // removed meanwhile
+    final cover = m.coverUrl?.trim() ?? '';
+    final hasCover = (cur.coverUrl?.trim() ?? '').isNotEmpty;
+    // keepCover only keeps a cover that's there and fine.
+    final useCover = cover.isNotEmpty &&
+        (!keepCover || !hasCover || CoverCache.isBroken(cur.coverUrl));
     final now = DateTime.now();
     await save(
-      e,
-      e.copyWith(
+      cur,
+      cur.copyWith(
         sourceId: Nullable(m.sourceId),
         latestChapter: Nullable(latest),
         latestCheckedAt: Nullable(now),
-        coverUrl: (!keepCover && m.coverUrl != null) ? Nullable(m.coverUrl) : null,
+        coverUrl: useCover ? Nullable(cover) : null,
       ),
       {
         'source_id': m.sourceId,
         'latest_chapter': latest,
         'latest_checked_at': now.toUtc().toIso8601String(),
-        if (!keepCover && m.coverUrl != null) 'cover_url': m.coverUrl,
+        if (useCover) 'cover_url': cover,
       },
     );
+    // The search result had no cover: ask MangaDex for this series' cover.
+    if (!useCover) await fillCoverFromSource(e.id);
   }
 
   /// Stops checking [e] (and stops the background job linking it again).
@@ -265,10 +390,14 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     final id = MangaDexService.idFrom(e.sourceId);
     if (id == null) return;
     final latest = await ref.read(mangaDexProvider).latestChapter(id);
+    if (!ref.mounted) return;
+    final cur = _current.where((x) => x.id == e.id).firstOrNull;
+    if (cur == null) return;
     final now = DateTime.now();
     await save(
-      e,
-      e.copyWith(latestChapter: Nullable(latest), latestCheckedAt: Nullable(now)),
+      cur,
+      cur.copyWith(
+          latestChapter: Nullable(latest), latestCheckedAt: Nullable(now)),
       {
         'latest_chapter': latest,
         'latest_checked_at': now.toUtc().toIso8601String(),
@@ -551,6 +680,35 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
       ref.read(readingLinksProvider).containsKey(e.id) ||
       MangaDexService.idFrom(e.sourceId) != null;
 
+  /// Titles whose (broken or wrong) cover was already looked up again this
+  /// session, so a cover the source keeps handing out isn't fetched in a loop.
+  final Set<String> _coverRetried = {};
+
+  /// Whether [e] needs its cover looked up: see [coverNeedsLookup].
+  bool _coverMissing(Entry e) {
+    final u = e.coverUrl?.trim() ?? '';
+    if (u.isEmpty) return true;
+    if (_coverRetried.contains(e.id)) return false;
+    return coverNeedsLookup(e,
+        mangaDexId: _mangaDexIdOf(e), broken: CoverCache.isBroken(u));
+  }
+
+  /// Fills in [entryId]'s cover with [url] if it still needs one. Returns
+  /// whether it did. Never swaps a working cover for the same broken one.
+  bool _setCover(String entryId, String url) {
+    final u = url.trim();
+    final now = _current.where((x) => x.id == entryId).firstOrNull;
+    if (u.isEmpty || now == null || !_coverMissing(now)) return false;
+    if (now.coverUrl?.trim() == u) return false;
+    // Replacing a broken / wrong cover: once per session is enough.
+    if ((now.coverUrl?.trim() ?? '').isNotEmpty) _coverRetried.add(entryId);
+    _set([
+      for (final x in _current)
+        x.id == entryId ? x.copyWith(coverUrl: Nullable(u)) : x,
+    ]);
+    return true;
+  }
+
   /// The cover of [e] on the source it's read from, or null.
   Future<String?> _coverFromCurrentSource(Entry e) async {
     try {
@@ -560,10 +718,10 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
         final found = await SourceCovers.find(source, link.seriesKey, e.title);
         if (found != null) return found;
       }
-      final md = MangaDexService.idFrom(e.sourceId);
-      if (md != null) {
+      final md = _mangaDexIdOf(e);
+      if (md != null && link?.sourceId != MangaDexSource.sourceId) {
         final url = (await ref.read(mangaDexProvider).manga(md))?.coverUrl;
-        if (url != null && url.trim().isNotEmpty) return url;
+        if (url != null && url.trim().isNotEmpty) return url.trim();
       }
     } catch (err) {
       if ((err is SourceException && err.offline) || isConnectionProblem(err)) {
@@ -573,21 +731,24 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
     return null;
   }
 
-  /// A title just got a reading source: if it has no cover yet, use the
-  /// one from that source right away.
-  Future<void> fillCoverFromSource(String entryId) async {
-    bool missing(Entry? e) =>
-        e != null && (e.coverUrl == null || e.coverUrl!.trim().isEmpty);
+  /// A title just got a reading source: if it has no cover yet (or a
+  /// broken one), use the one from that source right away. [known] is the
+  /// cover the source already showed for it (a search or Discover result),
+  /// used without asking the source again.
+  Future<void> fillCoverFromSource(String entryId, {String? known}) async {
     final e = _current.where((x) => x.id == entryId).firstOrNull;
-    if (!missing(e)) return;
-    final cover = await _coverFromCurrentSource(e!);
+    if (e == null || !_coverMissing(e)) return;
+    final k = known?.trim() ?? '';
+    if (k.isNotEmpty && !CoverCache.isBroken(k) && _setCover(entryId, k)) return;
+    final cover = await _coverFromCurrentSource(e);
     if (cover == null || !ref.mounted) return;
-    final now = _current.where((x) => x.id == entryId).firstOrNull;
-    if (!missing(now)) return;
-    _set([
-      for (final x in _current)
-        x.id == entryId ? x.copyWith(coverUrl: Nullable(cover)) : x,
-    ]);
+    _setCover(entryId, cover);
+  }
+
+  /// A title already in the list was picked again from search (AniList):
+  /// takes that result's cover when the title has none.
+  void adoptCover(String entryId, String? url) {
+    if (url != null && !CoverCache.isBroken(url)) _setCover(entryId, url);
   }
 
   /// Titles already looked up this session that AniList had no cover for,
@@ -622,7 +783,7 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
       _noCoverFound.clear();
     }
     bool needsCover(Entry e) =>
-        (e.coverUrl == null || e.coverUrl!.trim().isEmpty) &&
+        _coverMissing(e) &&
         (e.type != EntryType.comic || ext.isNotEmpty || _hasSource(e)) &&
         !_noCoverFound.contains(titleKey(e.title));
 
@@ -682,18 +843,22 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
           }
           // Look it up again in case it changed during the request.
           final now = _current.where((x) => x.id == e.id).firstOrNull;
+          final hadCover = (e.coverUrl?.trim() ?? '').isNotEmpty;
+          final target = (now != null && needsCover(now)) ? now : null;
+          // A broken / wrong cover is looked up once per session.
+          if (hadCover) _coverRetried.add(e.id);
           if (cover == null || cover.isEmpty) {
-            _noCoverFound.add(titleKey(e.title));
-          } else if (now != null && needsCover(now)) {
-            var after = now.copyWith(coverUrl: Nullable(cover));
-            if (now.author == null && match?.author != null) {
+            if (!hadCover) _noCoverFound.add(titleKey(e.title));
+          } else if (target != null && target.coverUrl?.trim() != cover.trim()) {
+            var after = target.copyWith(coverUrl: Nullable(cover.trim()));
+            if (target.author == null && match?.author != null) {
               after = after.copyWith(author: Nullable(match!.author));
             }
-            if (now.totalChapters == null && match?.totalChapters != null) {
+            if (target.totalChapters == null && match?.totalChapters != null) {
               after =
                   after.copyWith(totalChapters: Nullable(match!.totalChapters));
             }
-            _set([for (final x in _current) x.id == now.id ? after : x]);
+            _set([for (final x in _current) x.id == target.id ? after : x]);
           }
           // Stay well under AniList's rate limit.
           await Future<void>.delayed(const Duration(milliseconds: 700));

@@ -24,6 +24,15 @@ class SourceManga {
   /// Value stored in `entries.source_id`.
   String get sourceId => '${MangaDexService.prefix}$id';
 
+  SourceManga withCover(String? url) => SourceManga(
+        id: id,
+        title: title,
+        altTitles: altTitles,
+        coverUrl: url,
+        status: status,
+        year: year,
+      );
+
   bool matchesTitle(String other) {
     final k = normalizeTitle(other);
     if (k.isEmpty) return false;
@@ -56,9 +65,13 @@ String normalizeTitle(String s) =>
     s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9À-￿]+'), '');
 
 class MangaDexException implements Exception {
-  const MangaDexException(this.message, {this.rateLimited = false});
+  const MangaDexException(this.message,
+      {this.rateLimited = false, this.notFound = false});
   final String message;
   final bool rateLimited;
+
+  /// MangaDex has no such series / cover (404).
+  final bool notFound;
   @override
   String toString() => message;
 }
@@ -72,6 +85,74 @@ class MangaDexService {
   final http.Client _client;
   static const prefix = 'mangadex:';
   static const _api = 'api.mangadex.org';
+
+  /// How Panel names itself to MangaDex. MangaDex asks clients not to
+  /// pretend to be a browser, and its image servers may refuse (or answer
+  /// with a challenge page) when they see a fake browser User-Agent.
+  static const userAgent = 'Panel (com.readlist.panel)';
+
+  /// Where MangaDex cover images live.
+  static const coverHost = 'uploads.mangadex.org';
+
+  /// Size of the cover thumbnails Panel shows (MangaDex has 256 and 512).
+  static const coverSize = 512;
+
+  /// Headers for MangaDex images (covers). Off the web only: browsers
+  /// don't let apps set these.
+  static const imageHeaders = {
+    'User-Agent': userAgent,
+    'Referer': 'https://mangadex.org/',
+  };
+
+  /// Whether [host] serves MangaDex images.
+  static bool isMangaDexHost(String host) {
+    final h = host.toLowerCase();
+    return h == 'mangadex.org' || h.endsWith('.mangadex.org');
+  }
+
+  /// The cover thumbnail of [mangaId] whose file on MangaDex is [fileName]
+  /// (the `cover_art` relationship's `fileName`), or null when either is
+  /// missing. MangaDex thumbnails are always `<fileName>.<size>.jpg`, even
+  /// for png / webp originals. [size] null = the original file.
+  static String? coverUrlFor(String? mangaId, String? fileName,
+      {int? size = coverSize}) {
+    final id = mangaId?.trim() ?? '';
+    var file = fileName?.trim() ?? '';
+    if (id.isEmpty || file.isEmpty || file == 'null') return null;
+    // A file name that already carries a thumbnail suffix.
+    file = file.replaceFirst(RegExp(r'\.(256|512)\.jpg$'), '');
+    if (file.isEmpty) return null;
+    final path = '/covers/${Uri.encodeComponent(id)}/${Uri.encodeComponent(file)}';
+    return 'https://$coverHost$path${size == null ? '' : '.$size.jpg'}';
+  }
+
+  /// [url] as a well-formed MangaDex cover of [mangaId], or null when it
+  /// can't be one (wrong series, no file name, not a cover link). Fixes
+  /// the forms older versions or other apps saved: `http://`, the
+  /// `mangadex.org/covers/` path, a doubled or odd size suffix.
+  /// Links that aren't on MangaDex at all are returned unchanged (a cover
+  /// picked from AniList or a site is fine as it is).
+  static String? repairCoverUrl(String? url, String mangaId) {
+    final raw = url?.trim() ?? '';
+    if (raw.isEmpty) return null;
+    final u = Uri.tryParse(raw);
+    if (u == null) return null;
+    if (!isMangaDexHost(u.host)) return raw;
+    final seg = u.pathSegments.where((s) => s.isNotEmpty).toList();
+    final at = seg.indexOf('covers');
+    if (at < 0 || seg.length < at + 3) return null;
+    final id = seg[at + 1], file = seg[at + 2];
+    if (id != mangaId) return null;
+    final base = file.replaceFirst(RegExp(r'(\.(256|512)\.jpg)+$'), '');
+    final size = RegExp(r'\.(256|512)\.jpg$').firstMatch(file)?.group(1);
+    return coverUrlFor(id, base, size: size == null ? null : int.parse(size));
+  }
+
+  /// Whether [url] looks like a cover MangaDex will serve for [mangaId].
+  static bool isValidCoverUrl(String? url, String mangaId) {
+    final fixed = repairCoverUrl(url, mangaId);
+    return fixed != null && fixed == url?.trim();
+  }
 
   /// Chapter language used for "latest chapter".
   static const language = 'en';
@@ -98,12 +179,52 @@ class MangaDexService {
   }
 
   /// One series by id (for its cover), or null if MangaDex doesn't have it.
+  /// When the series' cover comes back without its file name (the
+  /// relationship wasn't expanded), the cover is looked up by its own id.
   Future<SourceManga?> manga(String id) async {
-    final json = await _get('/manga/$id', {
-      'includes[]': ['cover_art'],
-    });
+    final Map<String, dynamic> json;
+    try {
+      json = await _get('/manga/$id', {
+        'includes[]': ['cover_art'],
+      });
+    } on MangaDexException catch (e) {
+      if (e.notFound) return null;
+      rethrow;
+    }
     final data = json['data'];
-    return data is Map ? _toManga(data.cast<String, dynamic>()) : null;
+    if (data is! Map) return null;
+    final m = _toManga(data.cast<String, dynamic>());
+    if (m.coverUrl != null) return m;
+    final coverId = coverIdOf(data.cast<String, dynamic>());
+    if (coverId == null) return m;
+    final file = await _coverFileName(coverId);
+    final url = coverUrlFor(m.id, file);
+    return url == null ? m : m.withCover(url);
+  }
+
+  /// The file name of cover [coverId], or null.
+  Future<String?> _coverFileName(String coverId) async {
+    try {
+      final json = await _get('/cover/$coverId', const {});
+      final a = (json['data'] as Map?)?['attributes'];
+      final f = a is Map ? a['fileName'] : null;
+      return f is String && f.trim().isNotEmpty ? f.trim() : null;
+    } on MangaDexException catch (e) {
+      if (e.notFound) return null;
+      rethrow;
+    }
+  }
+
+  /// Id of the `cover_art` relationship of a manga object, if any.
+  @visibleForTesting
+  static String? coverIdOf(Map<String, dynamic> m) {
+    for (final r in (m['relationships'] as List?) ?? const []) {
+      if (r is Map && r['type'] == 'cover_art' && r['id'] is String) {
+        final id = (r['id'] as String).trim();
+        if (id.isNotEmpty) return id;
+      }
+    }
+    return null;
   }
 
   Map<String, String>? _tagIds;
@@ -275,14 +396,15 @@ class MangaDexService {
     final res = await _client.get(uri, headers: {
       'Accept': 'application/json',
       // MangaDex asks API clients to identify themselves (browsers can't).
-      if (!kIsWeb) 'User-Agent': 'Panel (com.readlist.panel)',
+      if (!kIsWeb) 'User-Agent': userAgent,
     }).timeout(const Duration(seconds: 20));
     if (res.statusCode == 429) {
       throw const MangaDexException('MangaDex is busy — try again shortly.',
           rateLimited: true);
     }
     if (res.statusCode != 200) {
-      throw MangaDexException('MangaDex request failed (${res.statusCode}).');
+      throw MangaDexException('MangaDex request failed (${res.statusCode}).',
+          notFound: res.statusCode == 404);
     }
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
@@ -303,14 +425,13 @@ class MangaDexService {
         alts.firstOrNull ??
         'Untitled';
 
+    // The first cover_art relationship with a file name is the main cover.
     String? cover;
     for (final r in (m['relationships'] as List?) ?? const []) {
-      if (r is Map && r['type'] == 'cover_art') {
-        final file = (r['attributes'] as Map?)?['fileName'] as String?;
-        if (file != null) {
-          cover = 'https://uploads.mangadex.org/covers/$id/$file.512.jpg';
-        }
-      }
+      if (r is! Map || r['type'] != 'cover_art') continue;
+      final file = (r['attributes'] as Map?)?['fileName'];
+      cover = coverUrlFor(id, file is String ? file : null);
+      if (cover != null) break;
     }
     return SourceManga(
       id: id,

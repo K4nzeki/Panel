@@ -5,6 +5,7 @@ import 'package:html/parser.dart' as html_parser;
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'cover_cache.dart';
 import 'extension_repo.dart';
 import 'mangadex.dart' show normalizeTitle;
 import 'sources/reader_source.dart';
@@ -191,7 +192,10 @@ abstract final class SourceCovers {
           .seriesCover(seriesKey, title: title)
           .timeout(_timeout);
       final u = url?.trim() ?? '';
-      return u.isEmpty ? null : u;
+      if (u.isEmpty) return null;
+      // So the cover downloads with the source's headers (Referer…).
+      CoverCache.useReaderSource(source, [u]);
+      return u;
     } on SourceException catch (e) {
       if (e.offline) rethrow;
       return null;

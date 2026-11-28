@@ -32,6 +32,8 @@ Future<bool> addResult(BuildContext context, WidgetRef ref, SearchResult r,
   final notifier = ref.read(entriesProvider.notifier);
   final existing = notifier.findByTitle(r.title);
   if (existing != null) {
+    // Already there, maybe without a cover: this result's fills it in.
+    notifier.adoptCover(existing.id, r.coverUrl);
     showSnack(context, '“${r.title}” is already in your list');
     return false;
   }

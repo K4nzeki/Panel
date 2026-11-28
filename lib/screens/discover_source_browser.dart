@@ -6,6 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import '../models/entry.dart';
 import '../models/reader.dart';
+import '../services/cover_cache.dart';
 import '../services/mangadex.dart';
 import '../services/sources/mangadex_source.dart';
 import '../services/sources/reader_source.dart';
@@ -144,6 +145,8 @@ class SourceBrowserState extends ConsumerState<SourceBrowser> {
       final p = await (s as BrowsableSource)
           .browse(sort: _sort, query: q, genre: _genre, page: page)
           .timeout(_timeout);
+      // Covers from this source load with its headers (Referer…).
+      CoverCache.useReaderSource(s, [for (final x in p.series) x.coverUrl]);
       return (s, p, null);
     } on TimeoutException {
       return (s, null, SourceException('${s.name} is taking too long.'));
@@ -514,10 +517,10 @@ Future<void> showSourceSeriesPreview(
 
       void linkTo(Entry entry) {
         ref.read(readingLinksProvider.notifier).choose(entry.id, source, series);
-        // No cover yet: take the one from this source.
+        // No cover yet (or a broken one): take the one from this source.
         unawaited(ref
             .read(entriesProvider.notifier)
-            .fillCoverFromSource(entry.id)
+            .fillCoverFromSource(entry.id, known: series.coverUrl)
             .catchError((_) {}));
         // Like the source picker: reading on MangaDex also turns on alerts.
         if (source.id == MangaDexSource.sourceId && !entry.isLinked) {
@@ -570,7 +573,15 @@ Future<void> showSourceSeriesPreview(
       }
 
       Future<void> readHere(Entry entry) async {
-        if (!linkedHere) linkTo(entry);
+        if (linkedHere) {
+          // Already read from here: still fill in a missing / broken cover.
+          unawaited(ref
+              .read(entriesProvider.notifier)
+              .fillCoverFromSource(entry.id, known: series.coverUrl)
+              .catchError((_) {}));
+        } else {
+          linkTo(entry);
+        }
         Navigator.of(sheetContext).pop();
         if (context.mounted) await openChapters(context, entry.id);
       }

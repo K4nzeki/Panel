@@ -118,8 +118,10 @@ class UpdateChecker {
     return e.copyWith(sourceId: Nullable(match.sourceId));
   }
 
-  static const _noCoverKey = 'covers_not_found_v2';
-  static const _noCoverSigKey = 'covers_not_found_sig_v2';
+  // v3: earlier "not found" verdicts were made without asking the linked
+  // MangaDex series, so they're forgotten once.
+  static const _noCoverKey = 'covers_not_found_v3';
+  static const _noCoverSigKey = 'covers_not_found_sig_v3';
 
   /// Finds covers for titles in [all] that don't have one (AniList first,
   /// then MangaDex, then the sites of installed extensions), plus a missing
@@ -138,13 +140,22 @@ class UpdateChecker {
       await prefs.setString(_noCoverSigKey, ext.signature);
     }
     final skip = {...?prefs.getStringList(_noCoverKey)};
-    final todo = all
-        .where((e) =>
-            (e.coverUrl == null || e.coverUrl!.trim().isEmpty) &&
-            (e.type != EntryType.comic || ext.isNotEmpty) &&
-            !skip.contains(normalizeTitle(e.title)))
-        .take(max)
-        .toList();
+    // Titles linked to MangaDex whose MangaDex cover link can't be right
+    // (no file name, wrong series…) are looked up again too.
+    bool needs(Entry e) {
+      final md = MangaDexService.idFrom(e.sourceId);
+      final noCover = e.coverUrl == null || e.coverUrl!.trim().isEmpty;
+      if (md != null && md.isNotEmpty) {
+        if (noCover) return !skip.contains(normalizeTitle(e.title));
+        return MangaDexService.repairCoverUrl(e.coverUrl, md) == null &&
+            !skip.contains('md:$md');
+      }
+      return noCover &&
+          (e.type != EntryType.comic || ext.isNotEmpty) &&
+          !skip.contains(normalizeTitle(e.title));
+    }
+
+    final todo = all.where(needs).take(max).toList();
 
     var found = 0;
     var done = 0;
@@ -154,7 +165,15 @@ class UpdateChecker {
       String? cover;
       var errored = false;
       try {
-        if (e.type != EntryType.comic) {
+        // Linked to MangaDex: that series' own cover is the right one.
+        final md = MangaDexService.idFrom(e.sourceId);
+        if (md != null && md.isNotEmpty) {
+          cover = (await _source.manga(md))?.coverUrl;
+          await _pause();
+        }
+        if ((cover == null || cover.isEmpty) &&
+            (e.coverUrl?.trim() ?? '').isEmpty &&
+            e.type != EntryType.comic) {
           match = await anilist.lookup(e.title);
           cover = match?.coverUrl;
           if (cover == null || cover.isEmpty) {
@@ -169,15 +188,19 @@ class UpdateChecker {
       } catch (_) {
         break; // offline
       }
-      if ((cover == null || cover.isEmpty) && ext.isNotEmpty) {
+      final hadCover = (e.coverUrl?.trim() ?? '').isNotEmpty;
+      if ((cover == null || cover.isEmpty) && ext.isNotEmpty && !hadCover) {
         cover = await ext.find(e.title);
       }
       if (cover == null || cover.isEmpty) {
         // Only remember "not found" when every source actually answered.
-        if (!errored) skip.add(normalizeTitle(e.title));
-      } else {
+        if (!errored) {
+          final md = MangaDexService.idFrom(e.sourceId);
+          skip.add(hadCover && md != null ? 'md:$md' : normalizeTitle(e.title));
+        }
+      } else if (cover.trim() != e.coverUrl?.trim()) {
         await save(e.id, {
-          'cover_url': cover,
+          'cover_url': cover.trim(),
           if (e.author == null && match?.author != null) 'author': match!.author,
           if (e.totalChapters == null && match?.totalChapters != null)
             'total_chapters': match!.totalChapters,
