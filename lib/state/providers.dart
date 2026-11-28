@@ -217,13 +217,12 @@ class EntriesNotifier extends AsyncNotifier<List<Entry>> {
       final links = ref.read(readingLinksProvider);
       if (links.isEmpty) return;
       _linksSeen = links;
-      ReaderSourceRegistry? registry;
+      final registry = ref.read(readerSourcesProvider);
       for (final e in list) {
         final link = links[e.id];
         final url = e.coverUrl?.trim() ?? '';
         if (link == null || url.isEmpty) continue;
         if (link.sourceId == MangaDexSource.sourceId) continue;
-        registry ??= ref.read(readerSourcesProvider);
         CoverCache.useReaderSource(registry.forLink(link), [url]);
       }
     } catch (_) {

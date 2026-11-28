@@ -1,14 +1,25 @@
+import 'dart:io';
 import 'package:material_ui/material_ui.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:flutter/services.dart';
 import 'package:panel/models/entry.dart';
 import 'package:panel/services/cover_cache.dart';
 import 'package:panel/theme.dart';
 import 'package:panel/widgets/common.dart';
 
 void main() {
+  setUpAll(() {
+    TestWidgetsFlutterBinding.ensureInitialized();
+    const channel = MethodChannel('plugins.flutter.io/path_provider');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (methodCall) async {
+      return Directory.systemTemp.path;
+    });
+  });
+
   // CoverImage watches the connection state, so it needs a ProviderScope.
   Widget wrap(Widget child, {bool dark = false}) => ProviderScope(
         child: MaterialApp(
@@ -41,10 +52,9 @@ void main() {
     CoverCache.client = MockClient((_) async => http.Response('', 404));
     const url = 'https://site.test/covers/missing.jpg';
 
-    await tester.pumpWidget(wrap(const CoverImage(
-        url: url, title: 'omniscient reader', width: 60, height: 90)));
-    // Let the (fake) download finish outside the test's fake clock.
     await tester.runAsync(() async {
+      await tester.pumpWidget(wrap(const CoverImage(
+          url: url, title: 'omniscient reader', width: 60, height: 90)));
       try {
         await CoverCache.bytes(url);
       } catch (_) {}

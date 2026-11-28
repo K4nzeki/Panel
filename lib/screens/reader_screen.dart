@@ -1681,7 +1681,7 @@ class _PageImageState extends State<_PageImage> with SingleTickerProviderStateMi
     );
     final Matrix4 begin = _transformationController.value;
     final Matrix4 target = begin.isIdentity()
-        ? (Matrix4.identity()..scale(2.5))
+        ? Matrix4.diagonal3Values(2.5, 2.5, 1.0)
         : Matrix4.identity();
     _animation = Matrix4Tween(begin: begin, end: target).animate(
       CurvedAnimation(parent: _animController!, curve: Curves.easeOutCubic),
