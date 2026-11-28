@@ -344,8 +344,8 @@ class CoverCache {
         if (!isSaved(u) && !isBroken(u)) u,
     ];
     var failedInARow = 0;
-    for (var i = 0; i < missing.length; i += 3) {
-      final batch = missing.skip(i).take(3);
+    for (var i = 0; i < missing.length; i += 2) {
+      final batch = missing.skip(i).take(2);
       final results = await Future.wait(batch.map((u) async {
         try {
           await bytes(u);
@@ -365,6 +365,7 @@ class CoverCache {
       } else {
         failedInARow = 0;
       }
+      await Future<void>.delayed(const Duration(milliseconds: 350));
     }
   }
 

@@ -113,6 +113,7 @@ class ExtensionCoverFinder {
           if (res.statusCode != 200) break; // blocked or no search page
           final cover = pickCover(html_parser.parse(res.body), key, uri);
           if (cover != null) return cover;
+          await Future<void>.delayed(const Duration(milliseconds: 200));
         } catch (_) {
           break; // site down or too slow: next site
         }

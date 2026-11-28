@@ -34,15 +34,7 @@ from it. The format is `MAJOR.MINOR.PATCH+BUILD`. Bump it in every release:
   Android refuses to install an update whose build number isn't higher than
   the installed one.
 
-Current: **2.5.0+16**. New: continuous scrolling in the long-strip
-reader — scroll past the end of a chapter straight into the next one, or
-up past the top into the previous one, without tapping Next / Previous.
-The next and previous chapters' page lists and first pages are fetched
-ahead of time so crossing over is immediate; the chapter name, page bar,
-bookmark, "last read" and Stats follow the chapter you're in; a chapter
-that fails to load shows "Try again" / "Skip this chapter". Pages keep
-their real height while loading, so nothing jumps. Can be turned off in
-the reader's settings (Continuous scrolling).
+Current: **2.4.0+15**. New performance and reader enhancements: startup speed and loading screen optimization with deferred background initialization, strict concurrency limits and rate-limiting on network requests and background cover scanning to prevent FPS drops and phone heating, optimized update and cover discovery with batching and timestamps, lazy chapter loading during reading with aggressive off-screen cache eviction to conserve RAM and GPU, refined reader tapping zones (left/right tap for page turning, center tap for toggling UI/controls), enhanced pinch-to-zoom support with smooth panning and double-tap reset, persistent cover art across quits and logins, tactile UI interactions with smooth continuous corners (squircles), momentum/inertial glide and rubber-band edge resistance scroll physics.
 
 Previous: **2.4.0+15** — Updates moved from the bottom bar to a bell
 at the top of Library, To Read, Discover and Stats; Discover browses and

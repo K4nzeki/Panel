@@ -104,7 +104,7 @@ class ReaderScreen extends ConsumerStatefulWidget {
 class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   /// Most chapters kept loaded in the long strip at once (when the extra
   /// ones can be dropped without moving the screen, see [ChapterStrip]).
-  static const _maxStripChapters = 5;
+  static const _maxStripChapters = 3;
 
   /// A strip this long (you kept reading chapter after chapter downwards,
   /// where nothing can be dropped) starts over on the chapter you're in.
@@ -1040,9 +1040,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (!_mode.paged || _pages == null) return _toggleUi();
     final w = MediaQuery.sizeOf(context).width;
     final x = d.localPosition.dx;
-    if (x < w / 3) {
+    if (x < w * 0.3) {
       _step(_sideDir(right: false));
-    } else if (x > w * 2 / 3) {
+    } else if (x > w * 0.7) {
       _step(_sideDir(right: true));
     } else {
       _toggleUi();
@@ -1665,10 +1665,32 @@ class _PageImage extends StatefulWidget {
   State<_PageImage> createState() => _PageImageState();
 }
 
-class _PageImageState extends State<_PageImage> {
+class _PageImageState extends State<_PageImage> with SingleTickerProviderStateMixin {
   int _attempt = 0;
   ImageStream? _stream;
   ImageStreamListener? _listener;
+  late final TransformationController _transformationController = TransformationController();
+  AnimationController? _animController;
+  Animation<Matrix4>? _animation;
+
+  void _handleDoubleTap() {
+    _animController?.dispose();
+    _animController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    );
+    final Matrix4 begin = _transformationController.value;
+    final Matrix4 target = begin.isIdentity()
+        ? (Matrix4.identity()..scale(2.5))
+        : Matrix4.identity();
+    _animation = Matrix4Tween(begin: begin, end: target).animate(
+      CurvedAnimation(parent: _animController!, curve: Curves.easeOutCubic),
+    );
+    _animController!.addListener(() {
+      _transformationController.value = _animation!.value;
+    });
+    _animController!.forward();
+  }
 
   @override
   void didChangeDependencies() {
@@ -1684,6 +1706,8 @@ class _PageImageState extends State<_PageImage> {
 
   @override
   void dispose() {
+    _animController?.dispose();
+    _transformationController.dispose();
     _unlisten();
     super.dispose();
   }
@@ -1749,7 +1773,7 @@ class _PageImageState extends State<_PageImage> {
           ),
         );
 
-    return Image(
+    final imageWidget = Image(
       image: widget.image(_attempt),
       key: ValueKey(_attempt),
       width: widget.width,
@@ -1758,6 +1782,17 @@ class _PageImageState extends State<_PageImage> {
       gaplessPlayback: true,
       frameBuilder: frame,
       errorBuilder: error,
+    );
+
+    return InteractiveViewer(
+      transformationController: _transformationController,
+      minScale: 1.0,
+      maxScale: 5.0,
+      constrained: true,
+      child: GestureDetector(
+        onDoubleTap: _handleDoubleTap,
+        child: imageWidget,
+      ),
     );
   }
 }
